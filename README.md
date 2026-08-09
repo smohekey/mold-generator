@@ -21,12 +21,12 @@ This separation allows the mold-generation algorithms to remain unchanged as ric
 
 ## Current vertical slice
 
-The CLI currently imports a closed manifold STL, builds a rectangular blank around its bounds, subtracts the source part, and exports the resulting body as STL:
+The CLI imports a closed manifold STL, builds a rectangular blank around its bounds, splits the blank through the source part, subtracts the source geometry from each half, and exports the two resulting mold parts:
 
 ```sh
-cargo run -p mold-cli -- input.stl output.stl [margin]
+cargo run -p mold-cli -- input.stl negative.stl positive.stl [margin] [axis]
 ```
 
-`margin` defaults to `10.0` model units and is applied on every side.
+`margin` defaults to `10.0` model units and is applied on every side. `axis` defaults to `z` and can be `x`, `y`, or `z`. The split plane currently passes through the midpoint of the source part along that axis.
 
-The resulting body is intentionally still a single closed block containing the cavity. It is a proof of the import → kernel → mold-core → export pipeline, not yet a printable mold. The next mold-generation step is to split that body into printable mold parts, after which registration features, structural ribs, spar exclusions, injection paths, and venting can be layered on without coupling those operations to Fusion or a particular geometry kernel.
+This is the first printable two-part mold shape. It does not yet include registration features, structural ribs, spar exclusions, injection paths, venting, or longitudinal subdivision into printer-sized sections. Those features can be layered on in `mold-core` without coupling the algorithms to Fusion or a particular geometry kernel.
