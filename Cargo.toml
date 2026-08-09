@@ -5,6 +5,7 @@ members = [
     "crates/mold-manifold",
     "crates/mold-core",
     "crates/mold-cli",
+    "crates/mold-test-models",
 ]
 
 [workspace.package]
@@ -18,3 +19,4 @@ stl_io = "0.11.0"
 mold-geometry = { path = "crates/mold-geometry" }
 mold-manifold = { path = "crates/mold-manifold" }
 mold-core = { path = "crates/mold-core" }
+mold-test-models = { path = "crates/mold-test-models" }
