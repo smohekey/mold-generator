@@ -7,7 +7,10 @@ use std::{
     process::ExitCode,
 };
 
-use mold_core::{Axis, MoldSettings, generate_sectioned_two_part_mold};
+use mold_core::{
+    Axis, MoldSettings, SectionRegistration, generate_registered_sectioned_two_part_mold,
+    generate_sectioned_two_part_mold,
+};
 use mold_geometry::Vec3;
 use mold_manifold::ManifoldKernel;
 
@@ -46,6 +49,11 @@ fn run() -> Result<(), Box<dyn Error>> {
         None => NonZeroUsize::MIN,
     };
     let section_axis = parse_axis(args.next().as_deref().unwrap_or("x"), "section axis")?;
+    let registration = match args.next().as_deref().unwrap_or("none") {
+        "none" => None,
+        "default" => Some(SectionRegistration::default()),
+        _ => return Err(invalid_input("registration must be none or default").into()),
+    };
 
     if args.next().is_some() {
         return Err(invalid_input("too many arguments").into());
@@ -56,16 +64,28 @@ fn run() -> Result<(), Box<dyn Error>> {
 
     let kernel = ManifoldKernel;
     let part = kernel.import_stl(&input)?;
-    let mold = generate_sectioned_two_part_mold(
-        &kernel,
-        &part,
-        MoldSettings {
-            margin: Vec3::new(margin, margin, margin),
-        },
-        split_axis,
-        section_axis,
-        section_count,
-    )?;
+    let settings = MoldSettings {
+        margin: Vec3::new(margin, margin, margin),
+    };
+    let mold = match registration {
+        Some(registration) => generate_registered_sectioned_two_part_mold(
+            &kernel,
+            &part,
+            settings,
+            split_axis,
+            section_axis,
+            section_count,
+            registration,
+        )?,
+        None => generate_sectioned_two_part_mold(
+            &kernel,
+            &part,
+            settings,
+            split_axis,
+            section_axis,
+            section_count,
+        )?,
+    };
 
     export_sections(&kernel, &mold.negative, Path::new(&negative_output))?;
     export_sections(&kernel, &mold.positive, Path::new(&positive_output))?;
@@ -117,11 +137,12 @@ fn invalid_input(message: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
         format!(
-            "{message}\nusage: mold-generator <input.stl> <negative.stl> <positive.stl> [margin] [split-axis] [sections] [section-axis]\n\n\
+            "{message}\nusage: mold-generator <input.stl> <negative.stl> <positive.stl> [margin] [split-axis] [sections] [section-axis] [registration]\n\n\
              margin defaults to 10.0 model units and is applied on every side\n\
              split-axis defaults to z and must be x, y, or z\n\
              sections defaults to 1 and must be a positive integer\n\
              section-axis defaults to x and must be x, y, or z\n\
+             registration defaults to none and may be none or default\n\
              when sections > 1, output names are suffixed with -01, -02, etc."
         ),
     )
