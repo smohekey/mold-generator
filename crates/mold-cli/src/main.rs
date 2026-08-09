@@ -1,6 +1,6 @@
 use std::{env, error::Error, io, process::ExitCode};
 
-use mold_core::{generate_mold, MoldSettings};
+use mold_core::{MoldSettings, generate_mold};
 use mold_geometry::Vec3;
 use mold_manifold::ManifoldKernel;
 
