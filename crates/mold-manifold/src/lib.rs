@@ -42,7 +42,10 @@ impl fmt::Display for ManifoldKernelError {
             Self::Geometry(error) => write!(f, "Manifold geometry error: {error}"),
             Self::InvalidBounds(bounds) => write!(f, "invalid cuboid bounds: {bounds:?}"),
             Self::InvalidOffset(distance) => {
-                write!(f, "offset distance must be finite and greater than zero: {distance}")
+                write!(
+                    f,
+                    "offset distance must be finite and greater than zero: {distance}"
+                )
             }
             Self::NonAffineTransform => write!(f, "transform must be affine"),
         }
