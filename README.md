@@ -8,6 +8,7 @@ A generic mold generator for STL/STEP-derived geometry, with a Rust core that is
 - `mold-manifold` is the first concrete backend, using the pure-Rust `manifold-rust` crate for triangle-mesh CSG and STL conversion.
 - `mold-core` contains mold-generation logic and depends only on `mold-geometry`.
 - `mold-cli` is the command-line frontend.
+- `mold-test-models` generates deterministic wing fixtures independently of `mold-core`.
 - CAD integrations such as Autodesk Fusion should remain thin adapters around the core.
 
 ## File formats
@@ -18,6 +19,18 @@ The initial implementation targets STL import and export. STEP is a future requi
 2. Add a future B-rep `SolidKernel` backend for workflows that require native CAD topology and proper STEP export.
 
 This separation allows the mold-generation algorithms to remain unchanged as richer CAD formats are added.
+
+## Wing test models
+
+`mold-test-models` generates deterministic closed wing solids from NACA 4-digit airfoils. Coordinates use X for chord, Y for span, and Z for vertical displacement. The generator lofts explicit spanwise stations, so sweep, taper, dihedral, twist, and non-linear gull-wing geometry can be exercised without relying on external STL fixtures.
+
+Available presets are `rectangular`, `tapered`, `swept`, `dihedral`, `twisted`, and `gull`:
+
+```sh
+cargo run -p mold-test-models -- gull gull-wing.stl
+```
+
+The library API also exposes `WingSpec`, `WingStation`, and `Naca4`, allowing tests to construct custom deterministic fixtures programmatically. The fixture generator intentionally does not depend on `mold-core`, so mold-generation tests do not generate their input geometry with the algorithms under test.
 
 ## Current vertical slice
 
