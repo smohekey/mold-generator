@@ -22,12 +22,12 @@ pub struct Mold<S> {
 pub fn generate_mold<K>(
     kernel: &K,
     part: &K::Solid,
-    part_bounds: Bounds3,
     settings: MoldSettings,
 ) -> Result<Mold<K::Solid>, K::Error>
 where
     K: SolidKernel,
 {
+    let part_bounds = kernel.bounds(part)?;
     let blank_bounds = Bounds3 {
         min: Vec3::new(
             part_bounds.min.x - settings.margin.x,
