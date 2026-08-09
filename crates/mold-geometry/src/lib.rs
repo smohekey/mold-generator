@@ -45,5 +45,9 @@ pub trait SolidKernel {
     fn union(&self, a: &Self::Solid, b: &Self::Solid) -> Result<Self::Solid, Self::Error>;
     fn difference(&self, a: &Self::Solid, b: &Self::Solid) -> Result<Self::Solid, Self::Error>;
     fn intersection(&self, a: &Self::Solid, b: &Self::Solid) -> Result<Self::Solid, Self::Error>;
-    fn transform(&self, solid: &Self::Solid, transform: Transform3) -> Result<Self::Solid, Self::Error>;
+    fn transform(
+        &self,
+        solid: &Self::Solid,
+        transform: Transform3,
+    ) -> Result<Self::Solid, Self::Error>;
 }
