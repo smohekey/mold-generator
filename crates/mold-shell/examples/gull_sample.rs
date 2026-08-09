@@ -32,10 +32,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     for (index, piece) in mold.negative.iter().enumerate() {
-        kernel.export_stl(piece, output.join(format!("mold-lower-{:02}.stl", index + 1)))?;
+        kernel.export_stl(
+            piece,
+            output.join(format!("mold-lower-{:02}.stl", index + 1)),
+        )?;
     }
     for (index, piece) in mold.positive.iter().enumerate() {
-        kernel.export_stl(piece, output.join(format!("mold-upper-{:02}.stl", index + 1)))?;
+        kernel.export_stl(
+            piece,
+            output.join(format!("mold-upper-{:02}.stl", index + 1)),
+        )?;
     }
 
     println!("generated visual sample in {}", output.display());
