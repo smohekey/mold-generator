@@ -1,6 +1,13 @@
-use std::{env, error::Error, io, process::ExitCode};
+use std::{
+    env,
+    error::Error,
+    io,
+    num::NonZeroUsize,
+    path::{Path, PathBuf},
+    process::ExitCode,
+};
 
-use mold_core::{Axis, MoldSettings, generate_two_part_mold};
+use mold_core::{Axis, MoldSettings, generate_sectioned_two_part_mold};
 use mold_geometry::Vec3;
 use mold_manifold::ManifoldKernel;
 
@@ -31,12 +38,14 @@ fn run() -> Result<(), Box<dyn Error>> {
             .map_err(|_| invalid_input("margin must be a number"))?,
         None => 10.0,
     };
-    let split_axis = match args.next().as_deref() {
-        None | Some("z") | Some("Z") => Axis::Z,
-        Some("x") | Some("X") => Axis::X,
-        Some("y") | Some("Y") => Axis::Y,
-        Some(_) => return Err(invalid_input("split axis must be x, y, or z").into()),
+    let split_axis = parse_axis(args.next().as_deref().unwrap_or("z"), "split axis")?;
+    let section_count = match args.next() {
+        Some(value) => value
+            .parse::<NonZeroUsize>()
+            .map_err(|_| invalid_input("section count must be a positive integer"))?,
+        None => NonZeroUsize::MIN,
     };
+    let section_axis = parse_axis(args.next().as_deref().unwrap_or("x"), "section axis")?;
 
     if args.next().is_some() {
         return Err(invalid_input("too many arguments").into());
@@ -47,27 +56,94 @@ fn run() -> Result<(), Box<dyn Error>> {
 
     let kernel = ManifoldKernel;
     let part = kernel.import_stl(&input)?;
-    let mold = generate_two_part_mold(
+    let mold = generate_sectioned_two_part_mold(
         &kernel,
         &part,
         MoldSettings {
             margin: Vec3::new(margin, margin, margin),
         },
         split_axis,
+        section_axis,
+        section_count,
     )?;
-    kernel.export_stl(&mold.negative, &negative_output)?;
-    kernel.export_stl(&mold.positive, &positive_output)?;
+
+    export_sections(&kernel, &mold.negative, Path::new(&negative_output))?;
+    export_sections(&kernel, &mold.positive, Path::new(&positive_output))?;
 
     Ok(())
+}
+
+fn export_sections(
+    kernel: &ManifoldKernel,
+    sections: &[mold_manifold::ManifoldSolid],
+    output: &Path,
+) -> Result<(), Box<dyn Error>> {
+    for (index, section) in sections.iter().enumerate() {
+        let path = section_output_path(output, index, sections.len());
+        kernel.export_stl(section, path)?;
+    }
+    Ok(())
+}
+
+fn section_output_path(base: &Path, index: usize, count: usize) -> PathBuf {
+    if count == 1 {
+        return base.to_owned();
+    }
+
+    let stem = base
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("mold");
+    let extension = base.extension().and_then(|value| value.to_str());
+    let digits = count.to_string().len().max(2);
+    let file_name = match extension {
+        Some(extension) => format!("{stem}-{:0digits$}.{extension}", index + 1),
+        None => format!("{stem}-{:0digits$}", index + 1),
+    };
+
+    base.with_file_name(file_name)
+}
+
+fn parse_axis(value: &str, name: &str) -> Result<Axis, io::Error> {
+    match value {
+        "x" | "X" => Ok(Axis::X),
+        "y" | "Y" => Ok(Axis::Y),
+        "z" | "Z" => Ok(Axis::Z),
+        _ => Err(invalid_input(&format!("{name} must be x, y, or z"))),
+    }
 }
 
 fn invalid_input(message: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
         format!(
-            "{message}\nusage: mold-generator <input.stl> <negative.stl> <positive.stl> [margin] [axis]\n\n\
+            "{message}\nusage: mold-generator <input.stl> <negative.stl> <positive.stl> [margin] [split-axis] [sections] [section-axis]\n\n\
              margin defaults to 10.0 model units and is applied on every side\n\
-             axis defaults to z and must be x, y, or z"
+             split-axis defaults to z and must be x, y, or z\n\
+             sections defaults to 1 and must be a positive integer\n\
+             section-axis defaults to x and must be x, y, or z\n\
+             when sections > 1, output names are suffixed with -01, -02, etc."
         ),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn single_section_preserves_requested_output_path() {
+        assert_eq!(
+            section_output_path(Path::new("left.stl"), 0, 1),
+            PathBuf::from("left.stl")
+        );
+    }
+
+    #[test]
+    fn multiple_sections_get_numbered_output_paths() {
+        assert_eq!(
+            section_output_path(Path::new("out/left.stl"), 1, 12),
+            PathBuf::from("out/left-02.stl")
+        );
+    }
 }
