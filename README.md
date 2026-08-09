@@ -5,22 +5,28 @@ A generic mold generator for STL/STEP-derived geometry, with a Rust core that is
 ## Architecture
 
 - `mold-geometry` defines backend-neutral geometry and the `SolidKernel` abstraction used by mold algorithms.
-- `mold-manifold` is the first concrete backend, using the pure-Rust `manifold-rust` crate for robust triangle-mesh CSG.
+- `mold-manifold` is the first concrete backend, using the pure-Rust `manifold-rust` crate for triangle-mesh CSG and STL conversion.
 - `mold-core` contains mold-generation logic and depends only on `mold-geometry`.
-- `mold-cli` is the command-line frontend and will host import/export plumbing.
+- `mold-cli` is the command-line frontend.
 - CAD integrations such as Autodesk Fusion should remain thin adapters around the core.
 
 ## File formats
 
-The initial implementation targets STL import and export. `stl_io` handles STL serialization, while `mold-manifold` converts between STL triangle meshes and Manifold solids.
-
-STEP is a future requirement, but it is deliberately not part of the core API. There are two intended upgrade paths:
+The initial implementation targets STL import and export. STEP is a future requirement, but it is deliberately not part of the core API. There are two intended upgrade paths:
 
 1. Import STEP through a future adapter, tessellate it, and pass the resulting mesh into the Manifold backend. This provides STEP input while preserving the STL/mesh processing pipeline.
 2. Add a future B-rep `SolidKernel` backend for workflows that require native CAD topology and proper STEP export.
 
 This separation allows the mold-generation algorithms to remain unchanged as richer CAD formats are added.
 
-## Initial milestone
+## Current vertical slice
 
-The first milestone is an end-to-end STL workflow capable of importing a manifold mesh, creating a mold blank around it, subtracting the source part robustly, and exporting the result as STL. From there the core can grow splitting, ribs, registration features, spar exclusions, injection paths, and venting without coupling those operations to Fusion or to a particular geometry kernel.
+The CLI currently imports a closed manifold STL, builds a rectangular blank around its bounds, subtracts the source part, and exports the resulting body as STL:
+
+```sh
+cargo run -p mold-cli -- input.stl output.stl [margin]
+```
+
+`margin` defaults to `10.0` model units and is applied on every side.
+
+The resulting body is intentionally still a single closed block containing the cavity. It is a proof of the import → kernel → mold-core → export pipeline, not yet a printable mold. The next mold-generation step is to split that body into printable mold parts, after which registration features, structural ribs, spar exclusions, injection paths, and venting can be layered on without coupling those operations to Fusion or a particular geometry kernel.
