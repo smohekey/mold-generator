@@ -265,11 +265,7 @@ fn split_bounds(bounds: Bounds3, axis: Axis, split: f64) -> (Bounds3, Bounds3) {
     (negative, positive)
 }
 
-fn section_ranges(
-    bounds: Bounds3,
-    axis: Axis,
-    count: NonZeroUsize,
-) -> Vec<(f64, f64)> {
+fn section_ranges(bounds: Bounds3, axis: Axis, count: NonZeroUsize) -> Vec<(f64, f64)> {
     let (min, max) = axis_range(bounds, axis);
     let width = (max - min) / count.get() as f64;
 
