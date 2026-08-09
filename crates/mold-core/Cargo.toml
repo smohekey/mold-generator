@@ -7,3 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 mold-geometry.workspace = true
+
+[dev-dependencies]
+mold-manifold.workspace = true
+mold-test-models = { path = "../mold-test-models" }
