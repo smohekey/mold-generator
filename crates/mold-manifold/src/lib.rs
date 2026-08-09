@@ -75,16 +75,14 @@ impl ManifoldKernel {
 
         mesh.vert_properties.reserve(stl.vertices.len() * 3);
         for vertex in &stl.vertices {
-            mesh.vert_properties.extend([
-                vertex[0] as f64,
-                vertex[1] as f64,
-                vertex[2] as f64,
-            ]);
+            mesh.vert_properties
+                .extend([vertex[0] as f64, vertex[1] as f64, vertex[2] as f64]);
         }
 
         mesh.tri_verts.reserve(stl.faces.len() * 3);
         for face in &stl.faces {
-            mesh.tri_verts.extend(face.vertices.map(|index| index as u64));
+            mesh.tri_verts
+                .extend(face.vertices.map(|index| index as u64));
         }
 
         // manifold-rust 0.9.x accepts closed, oriented 2-manifold meshes here.
@@ -195,7 +193,11 @@ impl SolidKernel for ManifoldKernel {
         self.checked(a.0.intersection(&b.0))
     }
 
-    fn transform(&self, solid: &Self::Solid, transform: Transform3) -> Result<Self::Solid, Self::Error> {
+    fn transform(
+        &self,
+        solid: &Self::Solid,
+        transform: Transform3,
+    ) -> Result<Self::Solid, Self::Error> {
         let m = transform.matrix;
         if m[3] != [0.0, 0.0, 0.0, 1.0] {
             return Err(ManifoldKernelError::NonAffineTransform);
@@ -211,11 +213,7 @@ impl SolidKernel for ManifoldKernel {
     }
 }
 
-fn triangle_normal(
-    a: stl_io::Vertex,
-    b: stl_io::Vertex,
-    c: stl_io::Vertex,
-) -> stl_io::Normal {
+fn triangle_normal(a: stl_io::Vertex, b: stl_io::Vertex, c: stl_io::Vertex) -> stl_io::Normal {
     let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
     let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
     let normal = [
@@ -226,11 +224,7 @@ fn triangle_normal(
     let length = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
 
     if length > 0.0 {
-        stl_io::Normal::new([
-            normal[0] / length,
-            normal[1] / length,
-            normal[2] / length,
-        ])
+        stl_io::Normal::new([normal[0] / length, normal[1] / length, normal[2] / length])
     } else {
         stl_io::Normal::new([0.0, 0.0, 0.0])
     }
