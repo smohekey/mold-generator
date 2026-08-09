@@ -12,3 +12,4 @@ path = "src/main.rs"
 [dependencies]
 mold-core.workspace = true
 mold-geometry.workspace = true
+mold-manifold.workspace = true
