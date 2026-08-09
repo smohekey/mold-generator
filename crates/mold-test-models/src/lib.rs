@@ -177,13 +177,17 @@ pub fn generate(spec: &WingSpec) -> Result<Manifold, WingError> {
             ]);
         }
     }
+
+    // The section profile is wound TE -> upper -> LE -> lower -> TE. With
+    // span increasing along +Y, the root cap therefore needs -Y normals and
+    // the tip cap +Y normals to remain consistent with the side faces.
     for i in 1..loop_len - 1 {
-        mesh.tri_verts.extend([0, i as u64 + 1, i as u64]);
+        mesh.tri_verts.extend([0, i as u64, i as u64 + 1]);
     }
     let end = (spec.stations.len() - 1) * loop_len;
     for i in 1..loop_len - 1 {
         mesh.tri_verts
-            .extend([end as u64, end as u64 + i as u64, end as u64 + i as u64 + 1]);
+            .extend([end as u64, end as u64 + i as u64 + 1, end as u64 + i as u64]);
     }
 
     let solid = Manifold::from_mesh_gl64(&mesh);
