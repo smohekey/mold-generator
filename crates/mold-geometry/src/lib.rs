@@ -21,6 +21,7 @@ pub struct Bounds3 {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Transform3 {
+    /// Row-major affine 4x4 transform matrix.
     pub matrix: [[f64; 4]; 4],
 }
 
@@ -39,6 +40,7 @@ pub trait SolidKernel {
     type Solid: Clone + Debug;
     type Error: std::error::Error + Send + Sync + 'static;
 
+    fn bounds(&self, solid: &Self::Solid) -> Result<Bounds3, Self::Error>;
     fn cuboid(&self, bounds: Bounds3) -> Result<Self::Solid, Self::Error>;
     fn union(&self, a: &Self::Solid, b: &Self::Solid) -> Result<Self::Solid, Self::Error>;
     fn difference(&self, a: &Self::Solid, b: &Self::Solid) -> Result<Self::Solid, Self::Error>;
