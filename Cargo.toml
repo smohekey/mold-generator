@@ -4,6 +4,7 @@ members = [
     "crates/mold-geometry",
     "crates/mold-manifold",
     "crates/mold-core",
+    "crates/mold-shell",
     "crates/mold-cli",
     "crates/mold-test-models",
 ]
@@ -19,4 +20,5 @@ stl_io = "0.11.0"
 mold-geometry = { path = "crates/mold-geometry" }
 mold-manifold = { path = "crates/mold-manifold" }
 mold-core = { path = "crates/mold-core" }
+mold-shell = { path = "crates/mold-shell" }
 mold-test-models = { path = "crates/mold-test-models" }
