@@ -4,12 +4,7 @@
 //! It deliberately owns STL conversion as well as the Manifold adapter so
 //! `mold-core` remains independent of both file formats and mesh libraries.
 
-use std::{
-    fmt,
-    fs::File,
-    io::BufWriter,
-    path::Path,
-};
+use std::{fmt, fs::File, io::BufWriter, path::Path};
 
 use manifold_rust::{
     linalg::{Mat3x4, Vec3 as ManifoldVec3},
@@ -111,17 +106,22 @@ impl ManifoldKernel {
         let mesh = solid.0.as_original().get_mesh_gl64(-1);
         let stride = mesh.num_prop as usize;
 
+        let vertex_at = |index: u64| {
+            let offset = index as usize * stride;
+            stl_io::Vertex::new([
+                mesh.vert_properties[offset] as f32,
+                mesh.vert_properties[offset + 1] as f32,
+                mesh.vert_properties[offset + 2] as f32,
+            ])
+        };
+
         let mut triangles = Vec::with_capacity(mesh.tri_verts.len() / 3);
         for indices in mesh.tri_verts.chunks_exact(3) {
-            let vertices = indices.map(|index| {
-                let offset = index as usize * stride;
-                stl_io::Vertex::new([
-                    mesh.vert_properties[offset] as f32,
-                    mesh.vert_properties[offset + 1] as f32,
-                    mesh.vert_properties[offset + 2] as f32,
-                ])
-            });
-
+            let vertices = [
+                vertex_at(indices[0]),
+                vertex_at(indices[1]),
+                vertex_at(indices[2]),
+            ];
             let normal = triangle_normal(vertices[0], vertices[1], vertices[2]);
             triangles.push(stl_io::Triangle { normal, vertices });
         }
