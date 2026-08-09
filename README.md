@@ -44,7 +44,8 @@ cargo run -p mold-cli -- \
     [margin] \
     [split-axis] \
     [sections] \
-    [section-axis]
+    [section-axis] \
+    [registration]
 ```
 
 Defaults are:
@@ -53,15 +54,18 @@ Defaults are:
 - `split-axis = z`
 - `sections = 1`
 - `section-axis = x`
+- `registration = none`
 
-For example, this creates a Z-split mold divided into four sections along X:
+For example, this creates a Z-split mold divided into four sections along X with mating registration keys:
 
 ```sh
-cargo run -p mold-cli -- wing.stl lower.stl upper.stl 10 z 4 x
+cargo run -p mold-cli -- wing.stl lower.stl upper.stl 10 z 4 x default
 ```
 
 The output files are then numbered `lower-01.stl` through `lower-04.stl` and `upper-01.stl` through `upper-04.stl`. With a single section, the exact requested output filenames are retained.
 
 The split plane currently passes through the midpoint of the source part along the split axis. Sections are equal-width divisions of the complete padded mold blank along the section axis. When the split and section axes differ, this gives exactly `2 × N` mold pieces.
 
-The next mold-generation work is to add geometry at the section and split interfaces: registration features, structural ribs/flanges, and then spar exclusions, injection paths, and venting. These remain operations in `mold-core` rather than Manifold-specific code.
+With `registration = default`, every internal section interface receives two rectangular male keys on the lower-index section and clearance sockets on the higher-index section. The default geometry uses a 4 mm key depth, 10 mm width, 4 mm height, 0.2 mm socket clearance, and a 2 mm inset from the outer mold face. The keys are placed in the outer-margin band on each mold half, away from the source-part cavity.
+
+The current mold representation is still a solid rectangular block minus the source cavity. Structural support ribs would therefore be redundant at this stage; they become useful once the mold is represented as a thin shell. The next mold-generation work should focus on split-half registration and then the thin-shell/support-rib representation before spar exclusions, injection paths, and venting.
