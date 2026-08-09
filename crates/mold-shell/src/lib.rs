@@ -122,7 +122,6 @@ where
             section_axis,
             section_min,
             settings,
-            half,
             WebSide::Min,
         );
         piece = union_web(kernel, part, piece, min_web)?;
@@ -134,7 +133,6 @@ where
             section_axis,
             section_max,
             settings,
-            half,
             WebSide::Max,
         );
         piece = union_web(kernel, part, piece, max_web)?;
@@ -198,22 +196,13 @@ fn section_web_bounds(
     section_axis: Axis,
     interface: f64,
     settings: ShellSettings,
-    half: Half,
     side: WebSide,
 ) -> Bounds3 {
     let mut bounds = padded(part_bounds, settings.flange_width);
 
     let (half_min, half_max) = axis_range(section_bounds, split_axis);
-    match half {
-        Half::Negative => {
-            set_min(&mut bounds, split_axis, half_min);
-            set_max(&mut bounds, split_axis, half_max);
-        }
-        Half::Positive => {
-            set_min(&mut bounds, split_axis, half_min);
-            set_max(&mut bounds, split_axis, half_max);
-        }
-    }
+    set_min(&mut bounds, split_axis, half_min);
+    set_max(&mut bounds, split_axis, half_max);
 
     match side {
         WebSide::Min => {
