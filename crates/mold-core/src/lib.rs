@@ -23,6 +23,32 @@ impl Default for MoldSettings {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SectionRegistration {
+    /// Distance a male key extends into the neighboring section.
+    pub depth: f64,
+    /// Key size along the non-section, non-split axis.
+    pub width: f64,
+    /// Key size along the split axis.
+    pub height: f64,
+    /// Gap added around the matching female socket.
+    pub clearance: f64,
+    /// Distance between the key and the exterior mold face on the split axis.
+    pub edge_inset: f64,
+}
+
+impl Default for SectionRegistration {
+    fn default() -> Self {
+        Self {
+            depth: 4.0,
+            width: 10.0,
+            height: 4.0,
+            clearance: 0.2,
+            edge_inset: 2.0,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Mold<S> {
     pub body: S,
@@ -74,9 +100,6 @@ where
     let split = axis_midpoint(part_bounds, split_axis);
     let (negative_bounds, positive_bounds) = split_bounds(blank_bounds, split_axis, split);
 
-    // Subtract the part from each half independently. Besides avoiding an
-    // unnecessary whole-mold boolean, this naturally leaves the cavity open
-    // at the split face wherever the source part crosses the split plane.
     let negative_blank = kernel.cuboid(negative_bounds)?;
     let positive_blank = kernel.cuboid(positive_bounds)?;
     let negative = kernel.difference(&negative_blank, part)?;
@@ -96,39 +119,235 @@ pub fn generate_sectioned_two_part_mold<K>(
 where
     K: SolidKernel,
 {
+    generate_sectioned_two_part_mold_impl(
+        kernel,
+        part,
+        settings,
+        split_axis,
+        section_axis,
+        section_count,
+        None,
+    )
+}
+
+pub fn generate_registered_sectioned_two_part_mold<K>(
+    kernel: &K,
+    part: &K::Solid,
+    settings: MoldSettings,
+    split_axis: Axis,
+    section_axis: Axis,
+    section_count: NonZeroUsize,
+    registration: SectionRegistration,
+) -> Result<SectionedTwoPartMold<K::Solid>, K::Error>
+where
+    K: SolidKernel,
+{
+    generate_sectioned_two_part_mold_impl(
+        kernel,
+        part,
+        settings,
+        split_axis,
+        section_axis,
+        section_count,
+        Some(registration),
+    )
+}
+
+fn generate_sectioned_two_part_mold_impl<K>(
+    kernel: &K,
+    part: &K::Solid,
+    settings: MoldSettings,
+    split_axis: Axis,
+    section_axis: Axis,
+    section_count: NonZeroUsize,
+    registration: Option<SectionRegistration>,
+) -> Result<SectionedTwoPartMold<K::Solid>, K::Error>
+where
+    K: SolidKernel,
+{
     let part_bounds = kernel.bounds(part)?;
     let blank_bounds = padded_bounds(part_bounds, settings.margin);
     let split = axis_midpoint(part_bounds, split_axis);
     let (negative_bounds, positive_bounds) = split_bounds(blank_bounds, split_axis, split);
     let section_ranges = section_bounds(blank_bounds, section_axis, section_count);
 
-    let negative = generate_sections(kernel, part, negative_bounds, section_axis, &section_ranges)?;
-    let positive = generate_sections(kernel, part, positive_bounds, section_axis, &section_ranges)?;
+    let negative = generate_sections(
+        kernel,
+        part,
+        negative_bounds,
+        split_axis,
+        section_axis,
+        &section_ranges,
+        registration.map(|settings| (settings, HalfSide::Negative)),
+    )?;
+    let positive = generate_sections(
+        kernel,
+        part,
+        positive_bounds,
+        split_axis,
+        section_axis,
+        &section_ranges,
+        registration.map(|settings| (settings, HalfSide::Positive)),
+    )?;
 
     Ok(SectionedTwoPartMold { negative, positive })
+}
+
+#[derive(Debug, Clone, Copy)]
+enum HalfSide {
+    Negative,
+    Positive,
 }
 
 fn generate_sections<K>(
     kernel: &K,
     part: &K::Solid,
     half_bounds: Bounds3,
+    split_axis: Axis,
     section_axis: Axis,
     section_ranges: &[(f64, f64)],
+    registration: Option<(SectionRegistration, HalfSide)>,
 ) -> Result<Vec<K::Solid>, K::Error>
 where
     K: SolidKernel,
 {
     let mut sections = Vec::with_capacity(section_ranges.len());
 
-    for &(min, max) in section_ranges {
+    for (index, &(min, max)) in section_ranges.iter().enumerate() {
         let Some(bounds) = clamp_axis_range(half_bounds, section_axis, min, max) else {
             continue;
         };
         let blank = kernel.cuboid(bounds)?;
-        sections.push(kernel.difference(&blank, part)?);
+        let mut section = kernel.difference(&blank, part)?;
+
+        if let Some((registration, side)) = registration
+            && split_axis != section_axis
+        {
+            if index + 1 < section_ranges.len() {
+                for key_bounds in registration_key_bounds(
+                    half_bounds,
+                    split_axis,
+                    section_axis,
+                    max,
+                    registration,
+                    side,
+                    RegistrationKind::Male,
+                ) {
+                    let key = kernel.cuboid(key_bounds)?;
+                    section = kernel.union(&section, &key)?;
+                }
+            }
+
+            if index > 0 {
+                for socket_bounds in registration_key_bounds(
+                    half_bounds,
+                    split_axis,
+                    section_axis,
+                    min,
+                    registration,
+                    side,
+                    RegistrationKind::Female,
+                ) {
+                    let socket = kernel.cuboid(socket_bounds)?;
+                    section = kernel.difference(&section, &socket)?;
+                }
+            }
+        }
+
+        sections.push(section);
     }
 
     Ok(sections)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RegistrationKind {
+    Male,
+    Female,
+}
+
+fn registration_key_bounds(
+    half_bounds: Bounds3,
+    split_axis: Axis,
+    section_axis: Axis,
+    interface: f64,
+    settings: SectionRegistration,
+    side: HalfSide,
+    kind: RegistrationKind,
+) -> Vec<Bounds3> {
+    let transverse_axis = remaining_axis(split_axis, section_axis);
+    let (transverse_min, transverse_max) = axis_range(half_bounds, transverse_axis);
+    let transverse_span = transverse_max - transverse_min;
+    let clearance = match kind {
+        RegistrationKind::Male => 0.0,
+        RegistrationKind::Female => settings.clearance,
+    };
+
+    [0.3, 0.7]
+        .into_iter()
+        .map(|fraction| {
+            let center = transverse_min + transverse_span * fraction;
+            let half_width = settings.width * 0.5 + clearance;
+            let mut bounds = half_bounds;
+            set_axis_min(&mut bounds, transverse_axis, center - half_width);
+            set_axis_max(&mut bounds, transverse_axis, center + half_width);
+
+            let (split_min, split_max) = axis_range(half_bounds, split_axis);
+            match side {
+                HalfSide::Negative => {
+                    set_axis_min(
+                        &mut bounds,
+                        split_axis,
+                        split_min + settings.edge_inset - clearance,
+                    );
+                    set_axis_max(
+                        &mut bounds,
+                        split_axis,
+                        split_min + settings.edge_inset + settings.height + clearance,
+                    );
+                }
+                HalfSide::Positive => {
+                    set_axis_min(
+                        &mut bounds,
+                        split_axis,
+                        split_max - settings.edge_inset - settings.height - clearance,
+                    );
+                    set_axis_max(
+                        &mut bounds,
+                        split_axis,
+                        split_max - settings.edge_inset + clearance,
+                    );
+                }
+            }
+
+            match kind {
+                RegistrationKind::Male => {
+                    let embed = settings.depth * 0.25;
+                    set_axis_min(&mut bounds, section_axis, interface - embed);
+                    set_axis_max(&mut bounds, section_axis, interface + settings.depth);
+                }
+                RegistrationKind::Female => {
+                    set_axis_min(&mut bounds, section_axis, interface);
+                    set_axis_max(
+                        &mut bounds,
+                        section_axis,
+                        interface + settings.depth + settings.clearance,
+                    );
+                }
+            }
+
+            bounds
+        })
+        .collect()
+}
+
+fn remaining_axis(a: Axis, b: Axis) -> Axis {
+    match (a, b) {
+        (Axis::X, Axis::Y) | (Axis::Y, Axis::X) => Axis::Z,
+        (Axis::X, Axis::Z) | (Axis::Z, Axis::X) => Axis::Y,
+        (Axis::Y, Axis::Z) | (Axis::Z, Axis::Y) => Axis::X,
+        _ => a,
+    }
 }
 
 fn padded_bounds(part_bounds: Bounds3, margin: Vec3) -> Bounds3 {
@@ -268,5 +487,28 @@ mod tests {
                 max: Vec3::new(10.0, 10.0, 10.0),
             })
         );
+    }
+
+    #[test]
+    fn registration_keys_are_placed_on_the_exterior_side_of_each_half() {
+        let bounds = Bounds3 {
+            min: Vec3::new(0.0, 0.0, -20.0),
+            max: Vec3::new(100.0, 200.0, 0.0),
+        };
+        let settings = SectionRegistration::default();
+        let keys = registration_key_bounds(
+            bounds,
+            Axis::Z,
+            Axis::Y,
+            50.0,
+            settings,
+            HalfSide::Negative,
+            RegistrationKind::Male,
+        );
+
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[0].min.z, -18.0);
+        assert_eq!(keys[0].max.z, -14.0);
+        assert_eq!(keys[0].max.y, 54.0);
     }
 }
