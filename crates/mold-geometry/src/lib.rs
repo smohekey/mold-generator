@@ -45,6 +45,15 @@ pub trait SolidKernel {
     fn union(&self, a: &Self::Solid, b: &Self::Solid) -> Result<Self::Solid, Self::Error>;
     fn difference(&self, a: &Self::Solid, b: &Self::Solid) -> Result<Self::Solid, Self::Error>;
     fn intersection(&self, a: &Self::Solid, b: &Self::Solid) -> Result<Self::Solid, Self::Error>;
+
+    /// Expand a solid outwards by approximately `distance` model units.
+    ///
+    /// Backends should preserve the original solid inside the result. Mesh
+    /// kernels may approximate curved portions according to their configured
+    /// tessellation quality, while a future B-rep backend can use an exact
+    /// native offset operation where available.
+    fn offset(&self, solid: &Self::Solid, distance: f64) -> Result<Self::Solid, Self::Error>;
+
     fn transform(
         &self,
         solid: &Self::Solid,
