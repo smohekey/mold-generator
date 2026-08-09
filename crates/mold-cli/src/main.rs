@@ -1,6 +1,6 @@
 use std::{env, error::Error, io, process::ExitCode};
 
-use mold_core::{MoldSettings, generate_mold};
+use mold_core::{Axis, MoldSettings, generate_two_part_mold};
 use mold_geometry::Vec3;
 use mold_manifold::ManifoldKernel;
 
@@ -19,14 +19,23 @@ fn run() -> Result<(), Box<dyn Error>> {
     let input = args
         .next()
         .ok_or_else(|| invalid_input("missing input STL"))?;
-    let output = args
+    let negative_output = args
         .next()
-        .ok_or_else(|| invalid_input("missing output STL"))?;
+        .ok_or_else(|| invalid_input("missing negative-side output STL"))?;
+    let positive_output = args
+        .next()
+        .ok_or_else(|| invalid_input("missing positive-side output STL"))?;
     let margin = match args.next() {
         Some(value) => value
             .parse::<f64>()
             .map_err(|_| invalid_input("margin must be a number"))?,
         None => 10.0,
+    };
+    let split_axis = match args.next().as_deref() {
+        None | Some("z") | Some("Z") => Axis::Z,
+        Some("x") | Some("X") => Axis::X,
+        Some("y") | Some("Y") => Axis::Y,
+        Some(_) => return Err(invalid_input("split axis must be x, y, or z").into()),
     };
 
     if args.next().is_some() {
@@ -38,14 +47,16 @@ fn run() -> Result<(), Box<dyn Error>> {
 
     let kernel = ManifoldKernel;
     let part = kernel.import_stl(&input)?;
-    let mold = generate_mold(
+    let mold = generate_two_part_mold(
         &kernel,
         &part,
         MoldSettings {
             margin: Vec3::new(margin, margin, margin),
         },
+        split_axis,
     )?;
-    kernel.export_stl(&mold.body, &output)?;
+    kernel.export_stl(&mold.negative, &negative_output)?;
+    kernel.export_stl(&mold.positive, &positive_output)?;
 
     Ok(())
 }
@@ -54,8 +65,9 @@ fn invalid_input(message: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
         format!(
-            "{message}\nusage: mold-generator <input.stl> <output.stl> [margin]\n\n\
-             margin defaults to 10.0 model units and is applied on every side"
+            "{message}\nusage: mold-generator <input.stl> <negative.stl> <positive.stl> [margin] [axis]\n\n\
+             margin defaults to 10.0 model units and is applied on every side\n\
+             axis defaults to z and must be x, y, or z"
         ),
     )
 }
