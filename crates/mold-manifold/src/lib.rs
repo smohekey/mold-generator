@@ -31,6 +31,7 @@ pub enum ManifoldKernelError {
     Io(std::io::Error),
     Geometry(ManifoldError),
     InvalidBounds(Bounds3),
+    InvalidOffset(f64),
     NonAffineTransform,
 }
 
@@ -40,6 +41,9 @@ impl fmt::Display for ManifoldKernelError {
             Self::Io(error) => write!(f, "I/O error: {error}"),
             Self::Geometry(error) => write!(f, "Manifold geometry error: {error}"),
             Self::InvalidBounds(bounds) => write!(f, "invalid cuboid bounds: {bounds:?}"),
+            Self::InvalidOffset(distance) => {
+                write!(f, "offset distance must be finite and greater than zero: {distance}")
+            }
             Self::NonAffineTransform => write!(f, "transform must be affine"),
         }
     }
@@ -85,9 +89,6 @@ impl ManifoldKernel {
                 .extend(face.vertices.map(|index| index as u64));
         }
 
-        // manifold-rust 0.9.x accepts closed, oriented 2-manifold meshes here.
-        // We keep STL validation at this backend boundary so mold-core can stay
-        // agnostic about mesh topology and future STEP/B-rep representations.
         let solid = Manifold::from_mesh_gl64(&mesh);
         self.checked(solid)
     }
@@ -99,8 +100,6 @@ impl ManifoldKernel {
     ) -> Result<(), ManifoldKernelError> {
         self.ensure_ok(&solid.0)?;
 
-        // Flatten mesh relations before serialization so all output vertices
-        // are expressed directly in world/model coordinates.
         let mesh = solid.0.as_original().get_mesh_gl64(-1);
         let stride = mesh.num_prop as usize;
 
@@ -191,6 +190,19 @@ impl SolidKernel for ManifoldKernel {
 
     fn intersection(&self, a: &Self::Solid, b: &Self::Solid) -> Result<Self::Solid, Self::Error> {
         self.checked(a.0.intersection(&b.0))
+    }
+
+    fn offset(&self, solid: &Self::Solid, distance: f64) -> Result<Self::Solid, Self::Error> {
+        if !distance.is_finite() || distance <= 0.0 {
+            return Err(ManifoldKernelError::InvalidOffset(distance));
+        }
+
+        // The Minkowski sum with a sphere is the geometric dilation of the
+        // source solid. Sixteen circular segments keeps the initial mesh
+        // backend reasonably light while producing a smooth enough mold skin;
+        // this can become an explicit quality setting later.
+        let kernel = Manifold::sphere(distance, 16);
+        self.checked(solid.0.minkowski_sum(&kernel))
     }
 
     fn transform(
