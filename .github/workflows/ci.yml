@@ -21,3 +21,17 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
+
+  visual-sample:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Generate gull wing and shell mold
+        run: cargo run -p mold-shell --example gull_sample --release
+      - name: Upload visual sample
+        uses: actions/upload-artifact@v4
+        with:
+          name: gull-wing-mold-sample
+          path: target/sample-mold/*.stl
+          if-no-files-found: error
