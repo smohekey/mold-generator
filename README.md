@@ -21,12 +21,34 @@ This separation allows the mold-generation algorithms to remain unchanged as ric
 
 ## Current vertical slice
 
-The CLI imports a closed manifold STL, builds a rectangular blank around its bounds, splits the blank through the source part, subtracts the source geometry from each half, and exports the two resulting mold parts:
+The CLI imports a closed manifold STL, builds a rectangular blank around its bounds, splits the blank through the source part, optionally subdivides each half into printable sections, subtracts the source geometry, and exports the resulting mold pieces:
 
 ```sh
-cargo run -p mold-cli -- input.stl negative.stl positive.stl [margin] [axis]
+cargo run -p mold-cli -- \
+    input.stl \
+    negative.stl \
+    positive.stl \
+    [margin] \
+    [split-axis] \
+    [sections] \
+    [section-axis]
 ```
 
-`margin` defaults to `10.0` model units and is applied on every side. `axis` defaults to `z` and can be `x`, `y`, or `z`. The split plane currently passes through the midpoint of the source part along that axis.
+Defaults are:
 
-This is the first printable two-part mold shape. It does not yet include registration features, structural ribs, spar exclusions, injection paths, venting, or longitudinal subdivision into printer-sized sections. Those features can be layered on in `mold-core` without coupling the algorithms to Fusion or a particular geometry kernel.
+- `margin = 10.0` model units on every side
+- `split-axis = z`
+- `sections = 1`
+- `section-axis = x`
+
+For example, this creates a Z-split mold divided into four sections along X:
+
+```sh
+cargo run -p mold-cli -- wing.stl lower.stl upper.stl 10 z 4 x
+```
+
+The output files are then numbered `lower-01.stl` through `lower-04.stl` and `upper-01.stl` through `upper-04.stl`. With a single section, the exact requested output filenames are retained.
+
+The split plane currently passes through the midpoint of the source part along the split axis. Sections are equal-width divisions of the complete padded mold blank along the section axis. When the split and section axes differ, this gives exactly `2 × N` mold pieces.
+
+The next mold-generation work is to add geometry at the section and split interfaces: registration features, structural ribs/flanges, and then spar exclusions, injection paths, and venting. These remain operations in `mold-core` rather than Manifold-specific code.
