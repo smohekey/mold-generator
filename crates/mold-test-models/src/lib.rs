@@ -141,15 +141,16 @@ pub fn generate(spec: &WingSpec) -> Result<Manifold, WingError> {
         ));
     }
 
-    let loop_len = spec.profile_points * 2;
+    let section_profile = profile(spec.airfoil, spec.profile_points, spec.closed_trailing_edge);
+    let loop_len = section_profile.len();
     let mut mesh = MeshGL64 {
         num_prop: 3,
         ..Default::default()
     };
     for station in &spec.stations {
-        for p in profile(spec.airfoil, spec.profile_points, spec.closed_trailing_edge) {
-            let x0 = p.0 * station.chord;
-            let z0 = p.1 * station.chord;
+        for &(profile_x, profile_z) in &section_profile {
+            let x0 = profile_x * station.chord;
+            let z0 = profile_z * station.chord;
             let pivot = 0.25 * station.chord;
             let a = station.twist_deg.to_radians();
             let dx = x0 - pivot;
@@ -233,9 +234,13 @@ fn profile(naca: Naca4, n: usize, closed_te: bool) -> Vec<(f64, f64)> {
         upper.push((x - yt * theta.sin(), yc + yt * theta.cos()));
         lower.push((x + yt * theta.sin(), yc - yt * theta.cos()));
     }
-    let mut out = Vec::with_capacity(n * 2);
+
+    // Walk TE -> LE on the upper surface, then LE -> TE on the lower surface.
+    // The leading and trailing edge vertices are shared, not duplicated, so
+    // each loft station is one topological loop rather than coincident edges.
+    let mut out = Vec::with_capacity(2 * n - 2);
     out.extend(upper.into_iter().rev());
-    out.extend(lower);
+    out.extend(lower.into_iter().skip(1).take(n - 2));
     out
 }
 
