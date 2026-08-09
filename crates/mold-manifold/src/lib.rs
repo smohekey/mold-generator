@@ -87,10 +87,10 @@ impl ManifoldKernel {
             mesh.tri_verts.extend(face.vertices.map(|index| index as u64));
         }
 
-        // STL files in the wild are not always topologically pristine. The
-        // robust importer still requires a closed, orientable surface, but can
-        // retain valid triangle soup for Manifold's robust boolean engine.
-        let solid = Manifold::from_mesh_gl64_robust(&mesh);
+        // manifold-rust 0.9.x accepts closed, oriented 2-manifold meshes here.
+        // We keep STL validation at this backend boundary so mold-core can stay
+        // agnostic about mesh topology and future STEP/B-rep representations.
+        let solid = Manifold::from_mesh_gl64(&mesh);
         self.checked(solid)
     }
 
