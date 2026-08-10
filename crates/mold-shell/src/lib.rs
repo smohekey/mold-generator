@@ -23,6 +23,16 @@ impl Default for ShellSettings {
     }
 }
 
+/// Explicit geometry used to divide a shell into its two mold halves.
+///
+/// The regions should cover the mold envelope and meet at the desired parting
+/// surface. This lets a curved or piecewise-planar parting surface follow a
+/// wing's local chord plane instead of forcing a single world-space plane.
+pub struct PartingRegions<'a, S> {
+    pub negative: &'a S,
+    pub positive: &'a S,
+}
+
 pub fn generate_sectioned_shell_mold<K>(
     kernel: &K,
     part: &K::Solid,
@@ -70,6 +80,59 @@ where
     )?;
 
     Ok(SectionedTwoPartMold { negative, positive })
+}
+
+/// Generate a shell mold using caller-supplied clipping solids for the two
+/// halves. Unlike the axis-aligned helper above, this supports non-planar
+/// parting surfaces such as gull/dihedral wings.
+///
+/// At this stage the explicit-parting path intentionally does not add a split
+/// flange: the clipping geometry defines the correct parting face first. A
+/// flange that follows that surface can be layered on independently.
+pub fn generate_sectioned_shell_mold_with_parting<K>(
+    kernel: &K,
+    part: &K::Solid,
+    parting: PartingRegions<'_, K::Solid>,
+    section_axis: Axis,
+    section_count: NonZeroUsize,
+    settings: ShellSettings,
+) -> Result<SectionedTwoPartMold<K::Solid>, K::Error>
+where
+    K: SolidKernel,
+{
+    let expanded = kernel.offset(part, settings.thickness)?;
+    let skin = kernel.difference(&expanded, part)?;
+    let expanded_bounds = kernel.bounds(&expanded)?;
+    let sections = section_ranges(expanded_bounds, section_axis, section_count);
+
+    let negative_skin = kernel.intersection(&skin, parting.negative)?;
+    let positive_skin = kernel.intersection(&skin, parting.positive)?;
+
+    let negative = clip_sections(kernel, &negative_skin, expanded_bounds, section_axis, &sections)?;
+    let positive = clip_sections(kernel, &positive_skin, expanded_bounds, section_axis, &sections)?;
+
+    Ok(SectionedTwoPartMold { negative, positive })
+}
+
+fn clip_sections<K>(
+    kernel: &K,
+    solid: &K::Solid,
+    bounds: Bounds3,
+    section_axis: Axis,
+    sections: &[(f64, f64)],
+) -> Result<Vec<K::Solid>, K::Error>
+where
+    K: SolidKernel,
+{
+    let mut pieces = Vec::with_capacity(sections.len());
+    for &(section_min, section_max) in sections {
+        let mut clip = bounds;
+        set_min(&mut clip, section_axis, section_min);
+        set_max(&mut clip, section_axis, section_max);
+        let clip = kernel.cuboid(clip)?;
+        pieces.push(kernel.intersection(solid, &clip)?);
+    }
+    Ok(pieces)
 }
 
 #[derive(Debug, Clone, Copy)]
