@@ -22,13 +22,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let lower_flange = chord_region(&spec, -3.0, 0.0, 12.0)?;
     let upper_flange = chord_region(&spec, 0.0, 3.0, 12.0)?;
 
-    // Two deliberately asymmetric FDM-friendly diamond keys. Each key is
-    // built from interpolated local wing stations, so its orientation follows
-    // the local parting surface instead of depending on fixture station spacing.
-    let key_a = diamond_key(&spec, 0.30, 95.0, 14.0, 5.0, 3.0)?;
-    let key_b = diamond_key(&spec, 0.72, 410.0, 12.0, 4.0, 3.5)?;
-    let socket_a = diamond_key(&spec, 0.30, 95.0, 14.6, 5.3, 3.25)?;
-    let socket_b = diamond_key(&spec, 0.72, 410.0, 12.6, 4.3, 3.75)?;
+    // Two deliberately asymmetric FDM-friendly registration keys. They are
+    // centered in the flange strips outside the airfoil envelope rather than
+    // over the wing itself. Each feature is built from interpolated local wing
+    // stations, so it follows the local parting surface and twist.
+    let key_a = diamond_key(&spec, FlangeSide::Leading, 95.0, 14.0, 4.5, 3.0)?;
+    let key_b = diamond_key(&spec, FlangeSide::Trailing, 410.0, 12.0, 4.0, 3.5)?;
+    let socket_a = diamond_key(&spec, FlangeSide::Leading, 95.0, 14.6, 4.8, 3.25)?;
+    let socket_b = diamond_key(&spec, FlangeSide::Trailing, 410.0, 12.6, 4.3, 3.75)?;
 
     let kernel = ManifoldKernel;
     let part = ManifoldSolid(wing);
@@ -99,9 +100,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy)]
+enum FlangeSide {
+    Leading,
+    Trailing,
+}
+
 fn diamond_key(
     spec: &WingSpec,
-    chord_fraction: f64,
+    side: FlangeSide,
     center_span: f64,
     span_width: f64,
     half_width: f64,
@@ -118,7 +125,12 @@ fn diamond_key(
     };
 
     for station in &stations {
-        let center_x = station.chord * chord_fraction;
+        // The flange extends 12 mm beyond each chord edge. Centering 6 mm
+        // outside the airfoil puts the feature in the middle of that strip.
+        let center_x = match side {
+            FlangeSide::Leading => -6.0,
+            FlangeSide::Trailing => station.chord + 6.0,
+        };
         for &(x, z) in &[
             (center_x - half_width, 0.0),
             (center_x, -height),
