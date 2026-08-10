@@ -8,9 +8,36 @@ use std::{
 use mold_manifold::ManifoldSolid;
 use zip::{CompressionMethod, ZipWriter, result::ZipError, write::SimpleFileOptions};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThreeMfColor {
+    pub red: u8,
+    pub green: u8,
+    pub blue: u8,
+    pub alpha: u8,
+}
+
+impl ThreeMfColor {
+    pub const fn rgb(red: u8, green: u8, blue: u8) -> Self {
+        Self {
+            red,
+            green,
+            blue,
+            alpha: 255,
+        }
+    }
+
+    fn display_color(self) -> String {
+        format!(
+            "#{:02X}{:02X}{:02X}{:02X}",
+            self.red, self.green, self.blue, self.alpha
+        )
+    }
+}
+
 pub struct ThreeMfObject<'a> {
     pub name: String,
     pub solid: &'a ManifoldSolid,
+    pub color: Option<ThreeMfColor>,
 }
 
 #[derive(Debug)]
@@ -82,16 +109,46 @@ fn write_model_xml(
         escape_xml(title)
     )?;
 
+    let colored_objects: Vec<_> = objects
+        .iter()
+        .enumerate()
+        .filter_map(|(index, object)| object.color.map(|color| (index, color)))
+        .collect();
+
+    if !colored_objects.is_empty() {
+        writeln!(out, "    <basematerials id=\"1\">")?;
+        for (index, color) in &colored_objects {
+            writeln!(
+                out,
+                "      <base name=\"{}\" displaycolor=\"{}\" />",
+                escape_xml(&objects[*index].name),
+                color.display_color()
+            )?;
+        }
+        writeln!(out, "    </basematerials>")?;
+    }
+
     for (index, object) in objects.iter().enumerate() {
         let object_id = index + 1;
         let mesh = object.solid.0.as_original().get_mesh_gl64(-1);
         let stride = mesh.num_prop as usize;
+        let material_index = colored_objects
+            .iter()
+            .position(|(object_index, _)| *object_index == index);
 
-        writeln!(
-            out,
-            "    <object id=\"{object_id}\" name=\"{}\" type=\"model\">",
-            escape_xml(&object.name)
-        )?;
+        if let Some(material_index) = material_index {
+            writeln!(
+                out,
+                "    <object id=\"{object_id}\" name=\"{}\" type=\"model\" pid=\"1\" pindex=\"{material_index}\">",
+                escape_xml(&object.name)
+            )?;
+        } else {
+            writeln!(
+                out,
+                "    <object id=\"{object_id}\" name=\"{}\" type=\"model\">",
+                escape_xml(&object.name)
+            )?;
+        }
         writeln!(out, "      <mesh>")?;
         writeln!(out, "        <vertices>")?;
         for vertex in mesh.vert_properties.chunks_exact(stride) {
@@ -154,5 +211,10 @@ mod tests {
     #[test]
     fn xml_escape_handles_names() {
         assert_eq!(escape_xml("upper & <left>"), "upper &amp; &lt;left&gt;");
+    }
+
+    #[test]
+    fn color_serializes_as_rgba_hex() {
+        assert_eq!(ThreeMfColor::rgb(0x12, 0x34, 0xAB).display_color(), "#1234ABFF");
     }
 }
