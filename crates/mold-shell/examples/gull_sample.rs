@@ -114,6 +114,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
     let webbing = WebbingSettings::default();
+    let segment_flanges = SegmentFlangeSettings::default();
     let expanded_bounds = kernel.bounds(&kernel.offset(&part, shell_settings.thickness)?)?;
     let segmentation = SegmentationSettings {
         print_volume: PrintVolume {
@@ -134,7 +135,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let envelope = PrintableEnvelope {
         flange_margin: FLANGE_MARGIN,
         shell_thickness: shell_settings.thickness,
-        web_depth: webbing.depth,
+        web_depth: webbing.depth.max(segment_flanges.width),
         span_samples: 24,
     };
     let boundaries: Vec<SegmentBoundary> = candidates
@@ -202,7 +203,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mut baseline,
         &ranges,
         &tiles,
-        SegmentFlangeSettings::default(),
+        segment_flanges,
         shell_settings.thickness,
         &socket_cutters,
     )?;
@@ -364,7 +365,7 @@ fn add_segment_join_flanges(
                     .into_iter()
                     .map(|point| add_scaled(point, direction, shell_thickness * 0.8))
                     .collect();
-                Ok(kernel.swept_rib(&path, direction, settings.width, settings.axial_thickness)?)
+                Ok(kernel.swept_rib(&path, direction, settings.axial_thickness, settings.width)?)
             };
             let lower = make_flange(WingSurface::Lower, lower_direction)?;
             let upper = make_flange(WingSurface::Upper, upper_direction)?;
