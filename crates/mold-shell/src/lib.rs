@@ -21,8 +21,8 @@ impl Default for ShellSettings {
 }
 
 /// Explicit geometry used to divide a shell into its two mold halves.
-/// Registration sockets are subtracted after the skin and flange have been
-/// united so neither can accidentally fill a socket intended for a loose key.
+/// Registration sockets are cut from the final printable pieces so later
+/// clipping or construction steps cannot refill or remove them.
 pub struct PartingRegions<'a, S> {
     pub negative: &'a S,
     pub positive: &'a S,
@@ -102,24 +102,39 @@ where
     if let Some(flange) = parting.positive_flange {
         positive_skin = kernel.union(&positive_skin, &kernel.difference(flange, part)?)?;
     }
-    for socket in parting.negative_sockets {
-        negative_skin = kernel.difference(&negative_skin, socket)?;
-    }
-    for socket in parting.positive_sockets {
-        positive_skin = kernel.difference(&positive_skin, socket)?;
-    }
 
-    // Clip using the bounds of the finished halves, not just the offset part.
-    // A flange can extend beyond the shell thickness, and registration sockets
-    // may live entirely in that extension. Using `expanded_bounds` here would
-    // trim those flange regions (and their sockets) back off after construction.
+    // Determine clipping bounds from the complete mold halves, including the
+    // flange extensions rather than only the offset source part.
     let negative_bounds = kernel.bounds(&negative_skin)?;
     let positive_bounds = kernel.bounds(&positive_skin)?;
     let mold_bounds = union_bounds(negative_bounds, positive_bounds);
 
-    let negative = clip_sections(kernel, &negative_skin, mold_bounds, section_axis, &sections)?;
-    let positive = clip_sections(kernel, &positive_skin, mold_bounds, section_axis, &sections)?;
+    let mut negative = clip_sections(kernel, &negative_skin, mold_bounds, section_axis, &sections)?;
+    let mut positive = clip_sections(kernel, &positive_skin, mold_bounds, section_axis, &sections)?;
+
+    // Registration is deliberately the final geometry operation. This makes
+    // each supplied cutter authoritative: if it intersects a printable piece,
+    // that exact volume is removed and nothing downstream can refill it.
+    subtract_cutters(kernel, &mut negative, parting.negative_sockets)?;
+    subtract_cutters(kernel, &mut positive, parting.positive_sockets)?;
+
     Ok(SectionedTwoPartMold { negative, positive })
+}
+
+fn subtract_cutters<K>(
+    kernel: &K,
+    pieces: &mut [K::Solid],
+    cutters: &[&K::Solid],
+) -> Result<(), K::Error>
+where
+    K: SolidKernel,
+{
+    for piece in pieces {
+        for cutter in cutters {
+            *piece = kernel.difference(piece, cutter)?;
+        }
+    }
+    Ok(())
 }
 
 fn clip_sections<K>(
