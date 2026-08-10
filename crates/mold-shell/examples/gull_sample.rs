@@ -2,19 +2,19 @@ use std::{fs, path::Path};
 
 use mold_3mf::{ThreeMfObject, write_3mf};
 use mold_core::{Axis, SectionedTwoPartMold};
-use mold_geometry::SolidKernel;
+use mold_geometry::{Bounds3, SolidKernel, Vec3};
 use mold_manifold::{ManifoldKernel, ManifoldSolid};
 use mold_shell::{
     FlangeDivisionSettings, FlangeEdge, PartingRegions, PrintTile, PrintVolume, SegmentBoundary,
-    SegmentationSettings, ShellSettings, TiledSegmentationSettings, WebbingSettings,
-    alternating_rib_layouts, attach_structural_webbing, divide_flange,
+    SegmentFlangeSettings, SegmentationSettings, ShellSettings, TiledSegmentationSettings,
+    WebbingSettings, alternating_rib_layouts, attach_structural_webbing, divide_flange,
     generate_sectioned_shell_mold_with_parting_ranges, partition_tiles_for_print_volume,
     split_with_cumulative_cutters,
 };
 use mold_test_models::{
     PrintableEnvelope, RibPathSpec, WingEdge, WingSpec, WingSurface, chord_band_region,
     chord_region, printable_tile_dimensions, registration_diamond, sample_rib_surface_path,
-    segment_normal, wing_segment_boundaries,
+    segment_normal, transverse_flange_blank, wing_segment_boundaries,
 };
 
 const FLANGE_MARGIN: f64 = 12.0;
@@ -149,7 +149,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let socket_cutters: Vec<&ManifoldSolid> = inserts.iter().map(|insert| &insert.solid).collect();
     let (lower_ribs, upper_ribs) = build_ribs(&kernel, &spec, &ranges, registration, webbing)?;
 
-    let baseline = generate_sectioned_shell_mold_with_parting_ranges(
+    let mut baseline = generate_sectioned_shell_mold_with_parting_ranges(
         &kernel,
         &part,
         PartingRegions {
@@ -165,6 +165,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Axis::Y,
         &ranges,
         shell_settings,
+    )?;
+    add_segment_join_flanges(
+        &kernel,
+        &spec,
+        &part,
+        &lower_region,
+        &upper_region,
+        &mut baseline,
+        &ranges,
+        &tiles,
+        SegmentFlangeSettings::default(),
+        shell_settings.thickness,
+        &socket_cutters,
     )?;
     let mut mold = SectionedTwoPartMold {
         negative: baseline.negative.clone(),
@@ -184,7 +197,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &upper_ribs,
         &socket_cutters,
     )?;
-
     let baseline = split_mold_into_tiles(&kernel, &spec, baseline, &ranges, &tiles)?;
     let mold = split_mold_into_tiles(&kernel, &spec, mold, &ranges, &tiles)?;
 
@@ -193,6 +205,103 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     validate_attached("lower", &mold.negative, &baseline.negative, &lower_webbing)?;
     validate_attached("upper", &mold.positive, &baseline.positive, &upper_webbing)?;
     export_artifacts(&kernel, output, &part, &mold, &inserts)?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_segment_join_flanges(
+    kernel: &ManifoldKernel,
+    spec: &WingSpec,
+    part: &ManifoldSolid,
+    lower_region: &ManifoldSolid,
+    upper_region: &ManifoldSolid,
+    mold: &mut SectionedTwoPartMold<ManifoldSolid>,
+    ranges: &[(f64, f64)],
+    tiles: &[PrintTile],
+    settings: SegmentFlangeSettings,
+    shell_thickness: f64,
+    exclusions: &[&ManifoldSolid],
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !settings.width.is_finite()
+        || settings.width <= shell_thickness
+        || settings.axial_thickness <= 0.0
+        || !(0.0..90.0).contains(&settings.maximum_overhang_angle_deg)
+    {
+        return Err("invalid segment flange settings".into());
+    }
+    let model_start = spec.stations.first().ok_or("wing has no stations")?.span;
+    let model_end = spec.stations.last().ok_or("wing has no stations")?.span;
+
+    let attach = |piece: &mut ManifoldSolid,
+                  blank: ManifoldSolid,
+                  half_region: &ManifoldSolid|
+     -> Result<(), Box<dyn std::error::Error>> {
+        let external = kernel.difference(&blank, part)?;
+        let half = kernel.intersection(&external, half_region)?;
+        *piece = kernel.union_attached(piece, &half)?;
+        Ok(())
+    };
+
+    for seam in 0..ranges.len().saturating_sub(1) {
+        let span = ranges[seam].1;
+        let ramp = settings.top_ramp_length();
+        let top_blank = ManifoldSolid(transverse_flange_blank(
+            spec,
+            &[(span - ramp, shell_thickness), (span, settings.width)],
+        )?);
+        let bed_blank = ManifoldSolid(transverse_flange_blank(
+            spec,
+            &[
+                (span, settings.width),
+                (span + settings.axial_thickness, settings.width),
+            ],
+        )?);
+        for (pieces, region) in [
+            (&mut mold.negative, lower_region),
+            (&mut mold.positive, upper_region),
+        ] {
+            attach(&mut pieces[seam], top_blank.clone(), region)?;
+            attach(&mut pieces[seam + 1], bed_blank.clone(), region)?;
+        }
+    }
+
+    for (section, range) in ranges.iter().enumerate() {
+        let section_tiles: Vec<&PrintTile> =
+            tiles.iter().filter(|tile| tile.span == *range).collect();
+        if section_tiles.len() < 2 {
+            continue;
+        }
+        for pair in section_tiles.windows(2) {
+            let chord_fraction = pair[0].chord.1;
+            let center = mold_test_models::interpolate_station(
+                spec,
+                ((range.0 + range.1) * 0.5).clamp(model_start, model_end),
+            )?;
+            let half_fraction = settings.axial_thickness / center.chord * 0.5;
+            let blank = ManifoldSolid(chord_band_region(
+                spec,
+                (
+                    (chord_fraction - half_fraction).max(0.0),
+                    (chord_fraction + half_fraction).min(1.0),
+                ),
+                -settings.width,
+                settings.width,
+                settings.width,
+            )?);
+            let clip = kernel.cuboid(Bounds3 {
+                min: Vec3::new(-10_000.0, range.0, -10_000.0),
+                max: Vec3::new(10_000.0, range.1, 10_000.0),
+            })?;
+            let blank = kernel.intersection(&blank, &clip)?;
+            attach(&mut mold.negative[section], blank.clone(), lower_region)?;
+            attach(&mut mold.positive[section], blank, upper_region)?;
+        }
+    }
+    for piece in mold.negative.iter_mut().chain(&mut mold.positive) {
+        for exclusion in exclusions {
+            *piece = kernel.difference(piece, exclusion)?;
+        }
+    }
     Ok(())
 }
 

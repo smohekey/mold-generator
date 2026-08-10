@@ -479,6 +479,41 @@ pub fn chord_band_region(
     checked_mesh(mesh, "chord band region")
 }
 
+/// A rectangular wing-following loft used as the source volume for external
+/// segment flanges. Subtracting the wing leaves material only outside the
+/// cavity while preserving a mating face at each requested span station.
+pub fn transverse_flange_blank(
+    spec: &WingSpec,
+    sections: &[(f64, f64)],
+) -> Result<Manifold, WingError> {
+    if sections.len() < 2
+        || sections.windows(2).any(|pair| pair[1].0 <= pair[0].0)
+        || sections.iter().any(|(_, margin)| *margin <= 0.0)
+    {
+        return Err(WingError::InvalidSpec(
+            "transverse flange sections need increasing spans and positive margins",
+        ));
+    }
+    let mut mesh = MeshGL64 {
+        num_prop: 3,
+        ..Default::default()
+    };
+    for &(span, margin) in sections {
+        let station = interpolate_station(spec, span)?;
+        for &(x, z) in &[
+            (-margin, -margin),
+            (station.chord + margin, -margin),
+            (station.chord + margin, margin),
+            (-margin, margin),
+        ] {
+            mesh.vert_properties
+                .extend(transform_station(&station, x, z));
+        }
+    }
+    close_quad_loft(&mut mesh, sections.len());
+    checked_mesh(mesh, "transverse flange blank")
+}
+
 pub fn registration_diamond(
     spec: &WingSpec,
     edge: WingEdge,
@@ -1059,5 +1094,14 @@ mod tests {
             assert!(!region.is_empty());
             assert!(region.volume() > 0.0);
         }
+    }
+
+    #[test]
+    fn tapered_transverse_flange_blank_is_a_closed_loft() {
+        let spec = preset("gull").unwrap();
+        let flange = transverse_flange_blank(&spec, &[(168.0, 3.0), (180.0, 12.0)]).unwrap();
+
+        assert!(!flange.is_empty());
+        assert!(flange.volume() > 0.0);
     }
 }

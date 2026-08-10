@@ -15,6 +15,29 @@ pub struct WebbingSettings {
     pub exclusion_clearance: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SegmentFlangeSettings {
+    pub width: f64,
+    pub axial_thickness: f64,
+    pub maximum_overhang_angle_deg: f64,
+}
+
+impl SegmentFlangeSettings {
+    pub fn top_ramp_length(self) -> f64 {
+        self.width / self.maximum_overhang_angle_deg.to_radians().tan()
+    }
+}
+
+impl Default for SegmentFlangeSettings {
+    fn default() -> Self {
+        Self {
+            width: 12.0,
+            axial_thickness: 3.0,
+            maximum_overhang_angle_deg: 45.0,
+        }
+    }
+}
+
 impl WebbingSettings {
     pub fn thickness(self) -> f64 {
         self.extrusion_width * self.wall_line_count as f64
@@ -1215,6 +1238,22 @@ mod tests {
         assert!(solid.0.difference(&rejoined.0).volume() < 1.0e-9);
         assert!(rejoined.0.difference(&solid.0).volume() < 1.0e-9);
         assert!(pieces[0].0.intersection(&pieces[1].0).volume() < 1.0e-9);
+    }
+
+    #[test]
+    fn transverse_top_flange_ramp_respects_overhang_angle() {
+        let settings = SegmentFlangeSettings {
+            width: 12.0,
+            axial_thickness: 3.0,
+            maximum_overhang_angle_deg: 45.0,
+        };
+
+        assert!((settings.top_ramp_length() - 12.0).abs() < 1.0e-9);
+        let shallower = SegmentFlangeSettings {
+            maximum_overhang_angle_deg: 30.0,
+            ..settings
+        };
+        assert!(shallower.top_ramp_length() > settings.top_ramp_length());
     }
 
     #[test]
