@@ -14,14 +14,7 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Format
-        run: cargo fmt --all
-      - name: Upload formatted mold-shell sources
-        uses: actions/upload-artifact@v4
-        with:
-          name: formatted-mold-shell
-          path: |
-            crates/mold-shell/src/lib.rs
-            crates/mold-shell/examples/gull_sample.rs
+        run: cargo fmt --all -- --check
       - name: Check
         run: cargo check --workspace --all-targets
       - name: Clippy
