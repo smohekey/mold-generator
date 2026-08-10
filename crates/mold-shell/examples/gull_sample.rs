@@ -192,15 +192,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let upper_webbing = additions(&kernel, &mold.positive, &baseline.positive)?;
     validate_attached("lower", &mold.negative, &baseline.negative, &lower_webbing)?;
     validate_attached("upper", &mold.positive, &baseline.positive, &upper_webbing)?;
-    export_artifacts(
-        &kernel,
-        output,
-        &part,
-        &mold,
-        &inserts,
-        &lower_webbing,
-        &upper_webbing,
-    )?;
+    export_artifacts(&kernel, output, &part, &mold, &inserts)?;
     Ok(())
 }
 
@@ -400,8 +392,6 @@ fn export_artifacts(
     part: &ManifoldSolid,
     mold: &SectionedTwoPartMold<ManifoldSolid>,
     inserts: &[RegistrationInsert],
-    lower_webbing: &[ManifoldSolid],
-    upper_webbing: &[ManifoldSolid],
 ) -> Result<(), Box<dyn std::error::Error>> {
     for (prefix, pieces) in [("lower", &mold.negative), ("upper", &mold.positive)] {
         for (index, piece) in pieces.iter().enumerate() {
@@ -414,15 +404,6 @@ fn export_artifacts(
     for insert in inserts {
         kernel.export_stl(&insert.solid, output.join(format!("{}.stl", insert.name)))?;
     }
-    for (prefix, pieces) in [("lower", lower_webbing), ("upper", upper_webbing)] {
-        for (index, piece) in pieces.iter().enumerate() {
-            kernel.export_stl(
-                piece,
-                output.join(format!("webbing-{prefix}-{:02}.stl", index + 1)),
-            )?;
-        }
-    }
-
     let mut assembly = vec![ThreeMfObject {
         name: "wing".to_owned(),
         solid: part,
@@ -440,14 +421,6 @@ fn export_artifacts(
             name: insert.name.clone(),
             solid: &insert.solid,
         });
-    }
-    for (prefix, pieces) in [("lower", lower_webbing), ("upper", upper_webbing)] {
-        for (index, piece) in pieces.iter().enumerate() {
-            assembly.push(ThreeMfObject {
-                name: format!("webbing-{prefix}-{:02}", index + 1),
-                solid: piece,
-            });
-        }
     }
     write_3mf(
         output.join("gull-wing-mold-assembly.3mf"),
