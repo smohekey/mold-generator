@@ -67,6 +67,14 @@ struct RegistrationInsert {
     solid: ManifoldSolid,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct LongitudinalFlangeSpec {
+    chord_fraction: f64,
+    span: (f64, f64),
+    surface: WingSurface,
+    direction: [f64; 3],
+}
+
 struct MoldArtifacts<'a> {
     output: &'a Path,
     part: &'a ManifoldSolid,
@@ -465,41 +473,30 @@ fn add_segment_join_flanges(
             let upper_direction =
                 segment_normal(spec, range.0.max(model_start), range.1.min(model_end))?;
             let lower_direction = upper_direction.map(|value| -value);
-            let start_normal = transverse_section_normal(spec, range.0)?;
-            let end_normal = transverse_section_normal(spec, range.1)?;
-            let make_flange =
-                |surface, direction| -> Result<ManifoldSolid, Box<dyn std::error::Error>> {
-                    let path = sample_longitudinal_surface_path(
-                        spec,
-                        chord_fraction,
-                        range.0,
-                        range.1,
-                        RIB_SAMPLES,
-                        surface,
-                    )?;
-                    let start_plane = SweepEndPlane {
-                        point: path[0],
-                        normal: start_normal,
-                    };
-                    let end_plane = SweepEndPlane {
-                        point: path[path.len() - 1],
-                        normal: end_normal,
-                    };
-                    let path: Vec<[f64; 3]> = path
-                        .into_iter()
-                        .map(|point| add_scaled(point, direction, longitudinal_attachment_offset))
-                        .collect();
-                    Ok(kernel.swept_rib_with_end_planes(
-                        &path,
-                        direction,
-                        settings.axial_thickness,
-                        settings.width,
-                        start_plane,
-                        end_plane,
-                    )?)
-                };
-            let lower = make_flange(WingSurface::Lower, lower_direction)?;
-            let upper = make_flange(WingSurface::Upper, upper_direction)?;
+            let lower = build_longitudinal_flange(
+                kernel,
+                spec,
+                LongitudinalFlangeSpec {
+                    chord_fraction,
+                    span: *range,
+                    surface: WingSurface::Lower,
+                    direction: lower_direction,
+                },
+                settings,
+                longitudinal_attachment_offset,
+            )?;
+            let upper = build_longitudinal_flange(
+                kernel,
+                spec,
+                LongitudinalFlangeSpec {
+                    chord_fraction,
+                    span: *range,
+                    surface: WingSurface::Upper,
+                    direction: upper_direction,
+                },
+                settings,
+                longitudinal_attachment_offset,
+            )?;
             mold.negative[section] = kernel.union_attached(&mold.negative[section], &lower)?;
             mold.positive[section] = kernel.union_attached(&mold.positive[section], &upper)?;
         }
@@ -510,6 +507,50 @@ fn add_segment_join_flanges(
         }
     }
     Ok(())
+}
+
+fn build_longitudinal_flange(
+    kernel: &ManifoldKernel,
+    wing: &WingSpec,
+    flange: LongitudinalFlangeSpec,
+    settings: SegmentFlangeSettings,
+    attachment_offset: f64,
+) -> Result<ManifoldSolid, Box<dyn std::error::Error>> {
+    // The bed flange owns the segment's mating face. Butt the longitudinal
+    // flange into its inboard face instead of leaving an end pad on the mating
+    // surface, where it would interfere visually with the neighboring part.
+    let start_span = flange.span.0 + settings.axial_thickness;
+    if start_span >= flange.span.1 {
+        return Err("segment is too short for its bed flange".into());
+    }
+    let path = sample_longitudinal_surface_path(
+        wing,
+        flange.chord_fraction,
+        start_span,
+        flange.span.1,
+        RIB_SAMPLES,
+        flange.surface,
+    )?;
+    let start_plane = SweepEndPlane {
+        point: path[0],
+        normal: transverse_section_normal(wing, start_span)?,
+    };
+    let end_plane = SweepEndPlane {
+        point: path[path.len() - 1],
+        normal: transverse_section_normal(wing, flange.span.1)?,
+    };
+    let path: Vec<[f64; 3]> = path
+        .into_iter()
+        .map(|point| add_scaled(point, flange.direction, attachment_offset))
+        .collect();
+    Ok(kernel.swept_rib_with_end_planes(
+        &path,
+        flange.direction,
+        settings.axial_thickness,
+        settings.width,
+        start_plane,
+        end_plane,
+    )?)
 }
 
 fn add_scaled(point: [f64; 3], direction: [f64; 3], distance: f64) -> [f64; 3] {
@@ -790,5 +831,43 @@ const fn wing_edge_name(edge: WingEdge) -> &'static str {
     match edge {
         WingEdge::Leading => "leading",
         WingEdge::Trailing => "trailing",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn longitudinal_flange_leaves_the_base_mating_face_to_the_bed_flange() {
+        let kernel = ManifoldKernel;
+        let wing = mold_wing_geometry::preset("tapered").unwrap();
+        let settings = SegmentFlangeSettings::default();
+        let upper_direction = segment_normal(&wing, 0.0, 190.0).unwrap();
+        let attachment_offset =
+            SegmentFlangeSettings::longitudinal_attachment_offset(SHELL_THICKNESS);
+
+        for (surface, direction) in [
+            (WingSurface::Lower, upper_direction.map(|value| -value)),
+            (WingSurface::Upper, upper_direction),
+        ] {
+            let flange = build_longitudinal_flange(
+                &kernel,
+                &wing,
+                LongitudinalFlangeSpec {
+                    chord_fraction: 0.5,
+                    span: (-3.0, 190.0),
+                    surface,
+                    direction,
+                },
+                settings,
+                attachment_offset,
+            )
+            .unwrap();
+            let bounds = kernel.bounds(&flange).unwrap();
+
+            assert!((bounds.min.y - 0.0).abs() < 1.0e-9);
+            assert!((bounds.max.y - 190.0).abs() < 1.0e-9);
+        }
     }
 }
