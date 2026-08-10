@@ -15,6 +15,7 @@ fn gull_wing_generates_valid_sectioned_shell_mold() {
         thickness: 3.0,
         flange_width: 12.0,
         web_thickness: 3.0,
+        structural_webbing: Some(Default::default()),
     };
 
     let mold = generate_sectioned_shell_mold(
@@ -77,4 +78,14 @@ fn gull_wing_generates_valid_sectioned_shell_mold() {
     assert!(all_bounds.1.x > part_bounds.max.x);
     assert!(all_bounds.0.z < part_bounds.min.z);
     assert!(all_bounds.1.z > part_bounds.max.z);
+}
+
+#[test]
+fn extrusion_width_controls_structural_web_thickness() {
+    let settings = mold_shell::WebbingSettings {
+        extrusion_width: 0.48,
+        wall_line_count: 3,
+        ..Default::default()
+    };
+    assert!((settings.thickness() - 1.44).abs() < 1.0e-9);
 }

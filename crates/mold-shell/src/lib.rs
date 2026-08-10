@@ -1,13 +1,46 @@
 use std::num::NonZeroUsize;
 
 use mold_core::{Axis, SectionedTwoPartMold};
-use mold_geometry::{Bounds3, SolidKernel, Vec3};
+use mold_geometry::{Bounds3, SolidKernel, Transform3, Vec3};
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WebbingSettings {
+    /// Axis pointing from the cavity toward the back of a custom-parted half.
+    pub back_axis: Axis,
+    pub extrusion_width: f64,
+    pub wall_line_count: usize,
+    pub longitudinal_web_count: usize,
+    pub max_brace_spacing: f64,
+    pub depth: f64,
+    pub exclusion_clearance: f64,
+}
+
+impl WebbingSettings {
+    pub fn thickness(self) -> f64 {
+        self.extrusion_width * self.wall_line_count as f64
+    }
+}
+
+impl Default for WebbingSettings {
+    fn default() -> Self {
+        Self {
+            back_axis: Axis::Z,
+            extrusion_width: 0.45,
+            wall_line_count: 3,
+            longitudinal_web_count: 3,
+            max_brace_spacing: 45.0,
+            depth: 8.0,
+            exclusion_clearance: 1.0,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ShellSettings {
     pub thickness: f64,
     pub flange_width: f64,
     pub web_thickness: f64,
+    pub structural_webbing: Option<WebbingSettings>,
 }
 
 impl Default for ShellSettings {
@@ -16,6 +49,7 @@ impl Default for ShellSettings {
             thickness: 3.0,
             flange_width: 12.0,
             web_thickness: 3.0,
+            structural_webbing: Some(WebbingSettings::default()),
         }
     }
 }
@@ -30,6 +64,10 @@ pub struct PartingRegions<'a, S> {
     pub positive_flange: Option<&'a S>,
     pub negative_sockets: &'a [&'a S],
     pub positive_sockets: &'a [&'a S],
+    /// Reserved volumes that structural webbing must not enter. Registration
+    /// socket cutters are automatically treated as exclusions too.
+    pub negative_webbing_exclusions: &'a [&'a S],
+    pub positive_webbing_exclusions: &'a [&'a S],
 }
 
 pub fn generate_sectioned_shell_mold<K>(
@@ -50,7 +88,7 @@ where
     let split = midpoint(part_bounds, split_axis);
     let (negative_half, positive_half) = split_bounds(expanded_bounds, split_axis, split);
     let sections = section_ranges(expanded_bounds, section_axis, section_count);
-    let negative = generate_half(
+    let mut negative = generate_half(
         kernel,
         part,
         &skin,
@@ -63,7 +101,7 @@ where
         settings,
         Half::Negative,
     )?;
-    let positive = generate_half(
+    let mut positive = generate_half(
         kernel,
         part,
         &skin,
@@ -76,6 +114,28 @@ where
         settings,
         Half::Positive,
     )?;
+    if let Some(webbing) = settings.structural_webbing {
+        add_structural_webbing(
+            kernel,
+            part,
+            &mut negative,
+            section_axis,
+            split_axis,
+            Half::Negative,
+            webbing,
+            std::iter::empty(),
+        )?;
+        add_structural_webbing(
+            kernel,
+            part,
+            &mut positive,
+            section_axis,
+            split_axis,
+            Half::Positive,
+            webbing,
+            std::iter::empty(),
+        )?;
+    }
     Ok(SectionedTwoPartMold { negative, positive })
 }
 
@@ -111,6 +171,37 @@ where
 
     let mut negative = clip_sections(kernel, &negative_skin, mold_bounds, section_axis, &sections)?;
     let mut positive = clip_sections(kernel, &positive_skin, mold_bounds, section_axis, &sections)?;
+
+    if let Some(webbing) = settings.structural_webbing {
+        add_structural_webbing(
+            kernel,
+            part,
+            &mut negative,
+            section_axis,
+            webbing.back_axis,
+            Half::Negative,
+            webbing,
+            parting
+                .negative_sockets
+                .iter()
+                .copied()
+                .chain(parting.negative_webbing_exclusions.iter().copied()),
+        )?;
+        add_structural_webbing(
+            kernel,
+            part,
+            &mut positive,
+            section_axis,
+            webbing.back_axis,
+            Half::Positive,
+            webbing,
+            parting
+                .positive_sockets
+                .iter()
+                .copied()
+                .chain(parting.positive_webbing_exclusions.iter().copied()),
+        )?;
+    }
 
     // Registration is deliberately the final geometry operation. This makes
     // each supplied cutter authoritative: if it intersects a printable piece,
@@ -176,6 +267,174 @@ fn union_bounds(a: Bounds3, b: Bounds3) -> Bounds3 {
 enum Half {
     Negative,
     Positive,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_structural_webbing<'a, K, I>(
+    kernel: &K,
+    part: &K::Solid,
+    pieces: &mut [K::Solid],
+    print_axis: Axis,
+    back_axis: Axis,
+    half: Half,
+    settings: WebbingSettings,
+    exclusions: I,
+) -> Result<(), K::Error>
+where
+    K: SolidKernel,
+    I: IntoIterator<Item = &'a K::Solid>,
+    K::Solid: 'a,
+{
+    if print_axis == back_axis
+        || settings.longitudinal_web_count < 2
+        || settings.thickness() <= 0.0
+        || settings.depth <= 0.0
+    {
+        return Ok(());
+    }
+    let exclusions: Vec<&K::Solid> = exclusions.into_iter().collect();
+    let transverse_axis = remaining_axis(print_axis, back_axis);
+
+    for piece in pieces {
+        let bounds = kernel.bounds(piece)?;
+        let (print_min, print_max) = axis_range(bounds, print_axis);
+        let (cross_min, cross_max) = axis_range(bounds, transverse_axis);
+        let (back_min, back_max) = axis_range(bounds, back_axis);
+        let depth_bounds = match half {
+            Half::Negative => (back_min, (back_min + settings.depth).min(back_max)),
+            Half::Positive => ((back_max - settings.depth).max(back_min), back_max),
+        };
+        let count = settings.longitudinal_web_count;
+        let inset = (settings.thickness() * 0.5).min((cross_max - cross_min) * 0.25);
+        let nodes: Vec<f64> = (0..count)
+            .map(|index| {
+                cross_min
+                    + inset
+                    + (cross_max - cross_min - 2.0 * inset) * index as f64 / (count - 1) as f64
+            })
+            .collect();
+        let mut lattice: Option<K::Solid> = None;
+
+        for &cross in &nodes {
+            let web = prism_between(
+                kernel,
+                print_axis,
+                transverse_axis,
+                back_axis,
+                (print_min, cross),
+                (print_max, cross),
+                depth_bounds,
+                settings.thickness(),
+            )?;
+            lattice = Some(union_optional(kernel, lattice, web)?);
+        }
+
+        for lane in 0..nodes.len() - 1 {
+            let lane_width = nodes[lane + 1] - nodes[lane];
+            let target_step = lane_width.max(settings.thickness());
+            let max_step = settings.max_brace_spacing.max(settings.thickness());
+            let brace_count = ((print_max - print_min) / target_step.min(max_step))
+                .ceil()
+                .max(1.0) as usize;
+            let step = (print_max - print_min) / brace_count as f64;
+            for index in 0..brace_count {
+                let a = print_min + index as f64 * step;
+                let b = a + step;
+                let (cross_a, cross_b) = if (index + lane) % 2 == 0 {
+                    (nodes[lane], nodes[lane + 1])
+                } else {
+                    (nodes[lane + 1], nodes[lane])
+                };
+                let brace = prism_between(
+                    kernel,
+                    print_axis,
+                    transverse_axis,
+                    back_axis,
+                    (a, cross_a),
+                    (b, cross_b),
+                    depth_bounds,
+                    settings.thickness(),
+                )?;
+                lattice = Some(union_optional(kernel, lattice, brace)?);
+            }
+        }
+
+        if let Some(mut lattice) = lattice {
+            lattice = kernel.difference(&lattice, part)?;
+            for exclusion in &exclusions {
+                let cutter = if settings.exclusion_clearance > 0.0 {
+                    kernel.offset(exclusion, settings.exclusion_clearance)?
+                } else {
+                    (*exclusion).clone()
+                };
+                lattice = kernel.difference(&lattice, &cutter)?;
+            }
+            *piece = kernel.union(piece, &lattice)?;
+        }
+    }
+    Ok(())
+}
+
+fn union_optional<K: SolidKernel>(
+    kernel: &K,
+    existing: Option<K::Solid>,
+    next: K::Solid,
+) -> Result<K::Solid, K::Error> {
+    match existing {
+        Some(existing) => kernel.union(&existing, &next),
+        None => Ok(next),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prism_between<K: SolidKernel>(
+    kernel: &K,
+    print_axis: Axis,
+    transverse_axis: Axis,
+    back_axis: Axis,
+    start: (f64, f64),
+    end: (f64, f64),
+    depth: (f64, f64),
+    thickness: f64,
+) -> Result<K::Solid, K::Error> {
+    let dp = end.0 - start.0;
+    let dc = end.1 - start.1;
+    let length = dp.hypot(dc);
+    let local = kernel.cuboid(Bounds3 {
+        min: Vec3::new(0.0, -thickness * 0.5, depth.0),
+        max: Vec3::new(length, thickness * 0.5, depth.1),
+    })?;
+    let u = (dp / length, dc / length);
+    let v = (-u.1, u.0);
+    let mut matrix = [[0.0; 4]; 4];
+    matrix[3][3] = 1.0;
+    set_transform_component(&mut matrix, print_axis, 0, u.0);
+    set_transform_component(&mut matrix, transverse_axis, 0, u.1);
+    set_transform_component(&mut matrix, print_axis, 1, v.0);
+    set_transform_component(&mut matrix, transverse_axis, 1, v.1);
+    set_transform_component(&mut matrix, back_axis, 2, 1.0);
+    set_transform_component(&mut matrix, print_axis, 3, start.0);
+    set_transform_component(&mut matrix, transverse_axis, 3, start.1);
+    kernel.transform(&local, Transform3 { matrix })
+}
+
+fn set_transform_component(matrix: &mut [[f64; 4]; 4], axis: Axis, column: usize, value: f64) {
+    matrix[axis_index(axis)][column] = value;
+}
+
+const fn axis_index(axis: Axis) -> usize {
+    match axis {
+        Axis::X => 0,
+        Axis::Y => 1,
+        Axis::Z => 2,
+    }
+}
+
+fn remaining_axis(a: Axis, b: Axis) -> Axis {
+    [Axis::X, Axis::Y, Axis::Z]
+        .into_iter()
+        .find(|axis| *axis != a && *axis != b)
+        .expect("two distinct axes always leave one remaining axis")
 }
 
 #[allow(clippy::too_many_arguments)]

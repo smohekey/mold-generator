@@ -3,6 +3,7 @@ use std::{fs, num::NonZeroUsize, path::Path};
 use manifold_rust::{manifold::Manifold, types::MeshGL64};
 use mold_3mf::{ThreeMfObject, write_3mf};
 use mold_core::Axis;
+use mold_geometry::SolidKernel;
 use mold_manifold::{ManifoldKernel, ManifoldSolid};
 use mold_shell::{PartingRegions, ShellSettings, generate_sectioned_shell_mold_with_parting};
 use mold_test_models::{WingSpec, WingStation};
@@ -69,6 +70,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let part = ManifoldSolid(wing);
     let socket_cutters: Vec<&ManifoldSolid> = inserts.iter().map(|insert| &insert.solid).collect();
 
+    let baseline_settings = ShellSettings {
+        structural_webbing: None,
+        ..Default::default()
+    };
+    let baseline = generate_sectioned_shell_mold_with_parting(
+        &kernel,
+        &part,
+        PartingRegions {
+            negative: &lower_region,
+            positive: &upper_region,
+            negative_flange: Some(&lower_flange),
+            positive_flange: Some(&upper_flange),
+            negative_sockets: &socket_cutters,
+            positive_sockets: &socket_cutters,
+            negative_webbing_exclusions: &[],
+            positive_webbing_exclusions: &[],
+        },
+        Axis::Y,
+        NonZeroUsize::new(SEGMENT_COUNT).unwrap(),
+        baseline_settings,
+    )?;
+
     let mold = generate_sectioned_shell_mold_with_parting(
         &kernel,
         &part,
@@ -79,11 +102,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             positive_flange: Some(&upper_flange),
             negative_sockets: &socket_cutters,
             positive_sockets: &socket_cutters,
+            negative_webbing_exclusions: &[],
+            positive_webbing_exclusions: &[],
         },
         Axis::Y,
         NonZeroUsize::new(SEGMENT_COUNT).unwrap(),
         ShellSettings::default(),
     )?;
+
+    let lower_webbing: Vec<ManifoldSolid> = mold
+        .negative
+        .iter()
+        .zip(&baseline.negative)
+        .map(|(webbed, plain)| kernel.difference(webbed, plain))
+        .collect::<Result<_, _>>()?;
+    let upper_webbing: Vec<ManifoldSolid> = mold
+        .positive
+        .iter()
+        .zip(&baseline.positive)
+        .map(|(webbed, plain)| kernel.difference(webbed, plain))
+        .collect::<Result<_, _>>()?;
+    let webbing = ShellSettings::default().structural_webbing.unwrap();
+    println!(
+        "structural webbing: {} longitudinal webs, {:.2} mm thick ({} x {:.2} mm extrusion), max brace spacing {:.1} mm, depth {:.1} mm",
+        webbing.longitudinal_web_count,
+        webbing.thickness(),
+        webbing.wall_line_count,
+        webbing.extrusion_width,
+        webbing.max_brace_spacing,
+        webbing.depth,
+    );
 
     for (index, piece) in mold.negative.iter().enumerate() {
         kernel.export_stl(
@@ -99,6 +147,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     for insert in &inserts {
         kernel.export_stl(&insert.solid, output.join(format!("{}.stl", insert.name)))?;
+    }
+    for (index, web) in lower_webbing.iter().enumerate() {
+        kernel.export_stl(
+            web,
+            output.join(format!("webbing-lower-{:02}.stl", index + 1)),
+        )?;
+    }
+    for (index, web) in upper_webbing.iter().enumerate() {
+        kernel.export_stl(
+            web,
+            output.join(format!("webbing-upper-{:02}.stl", index + 1)),
+        )?;
     }
 
     let mut assembly =
@@ -123,6 +183,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         assembly.push(ThreeMfObject {
             name: insert.name.clone(),
             solid: &insert.solid,
+        });
+    }
+    for (index, web) in lower_webbing.iter().enumerate() {
+        assembly.push(ThreeMfObject {
+            name: format!("webbing-lower-{:02}", index + 1),
+            solid: web,
+        });
+    }
+    for (index, web) in upper_webbing.iter().enumerate() {
+        assembly.push(ThreeMfObject {
+            name: format!("webbing-upper-{:02}", index + 1),
+            solid: web,
         });
     }
 
