@@ -1,6 +1,7 @@
 use std::{fs, num::NonZeroUsize, path::Path};
 
 use manifold_rust::{manifold::Manifold, types::MeshGL64};
+use mold_3mf::{ThreeMfObject, write_3mf};
 use mold_core::Axis;
 use mold_manifold::{ManifoldKernel, ManifoldSolid};
 use mold_shell::{PartingRegions, ShellSettings, generate_sectioned_shell_mold_with_parting};
@@ -57,6 +58,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             output.join(format!("mold-upper-{:02}.stl", index + 1)),
         )?;
     }
+
+    let mut assembly = Vec::with_capacity(1 + mold.negative.len() + mold.positive.len());
+    assembly.push(ThreeMfObject {
+        name: "wing".to_owned(),
+        solid: &part,
+    });
+    for (index, piece) in mold.negative.iter().enumerate() {
+        assembly.push(ThreeMfObject {
+            name: format!("mold-lower-{:02}", index + 1),
+            solid: piece,
+        });
+    }
+    for (index, piece) in mold.positive.iter().enumerate() {
+        assembly.push(ThreeMfObject {
+            name: format!("mold-upper-{:02}", index + 1),
+            solid: piece,
+        });
+    }
+    write_3mf(
+        output.join("gull-wing-mold-assembly.3mf"),
+        "Gull wing mold validation assembly",
+        &assembly,
+    )?;
 
     println!("generated visual sample in {}", output.display());
     Ok(())
