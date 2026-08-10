@@ -22,14 +22,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let lower_flange = chord_region(&spec, -3.0, 0.0, 12.0)?;
     let upper_flange = chord_region(&spec, 0.0, 3.0, 12.0)?;
 
-    // Two deliberately asymmetric FDM-friendly registration keys. They are
-    // centered in the flange strips outside the airfoil envelope rather than
-    // over the wing itself. Each feature is built from interpolated local wing
-    // stations, so it follows the local parting surface and twist.
-    let key_a = diamond_key(&spec, FlangeSide::Leading, 95.0, 14.0, 4.5, 3.0)?;
-    let key_b = diamond_key(&spec, FlangeSide::Trailing, 410.0, 12.0, 4.0, 3.5)?;
-    let socket_a = diamond_key(&spec, FlangeSide::Leading, 95.0, 14.6, 4.8, 3.25)?;
-    let socket_b = diamond_key(&spec, FlangeSide::Trailing, 410.0, 12.6, 4.3, 3.75)?;
+    // Two deliberately asymmetric FDM-friendly registration keys. Their
+    // diamond footprint lies in the local flange plane (chord x span), then
+    // the feature is extruded along the local parting normal.
+    let key_a = diamond_key(&spec, FlangeSide::Leading, 95.0, 5.0, 7.0, 3.0)?;
+    let key_b = diamond_key(&spec, FlangeSide::Trailing, 410.0, 4.5, 6.0, 3.5)?;
+    let socket_a = diamond_key(&spec, FlangeSide::Leading, 95.0, 5.3, 7.3, 3.25)?;
+    let socket_b = diamond_key(&spec, FlangeSide::Trailing, 410.0, 4.8, 6.3, 3.75)?;
 
     let kernel = ManifoldKernel;
     let part = ManifoldSolid(wing);
@@ -110,44 +109,76 @@ fn diamond_key(
     spec: &WingSpec,
     side: FlangeSide,
     center_span: f64,
-    span_width: f64,
-    half_width: f64,
+    chord_half_width: f64,
+    span_half_width: f64,
     height: f64,
 ) -> Result<Manifold, Box<dyn std::error::Error>> {
-    let stations = [
-        interpolate_station(spec, center_span - span_width * 0.5)?,
-        interpolate_station(spec, center_span + span_width * 0.5)?,
+    let center = interpolate_station(spec, center_span)?;
+    let inboard = interpolate_station(spec, center_span - span_half_width)?;
+    let outboard = interpolate_station(spec, center_span + span_half_width)?;
+
+    let center_x = flange_center_x(&center, side);
+    let inboard_x = flange_center_x(&inboard, side);
+    let outboard_x = flange_center_x(&outboard, side);
+
+    // Diamond vertices are ordered around the flange plane: chord-inboard,
+    // span-inboard, chord-outboard, span-outboard. The base extends slightly
+    // into the negative flange so the male key has a robust boolean overlap.
+    let footprint = [
+        transform_station(&center, center_x - chord_half_width, 0.0),
+        transform_station(&inboard, inboard_x, 0.0),
+        transform_station(&center, center_x + chord_half_width, 0.0),
+        transform_station(&outboard, outboard_x, 0.0),
+    ];
+    let top = [
+        transform_station(&center, center_x - chord_half_width, height),
+        transform_station(&inboard, inboard_x, height),
+        transform_station(&center, center_x + chord_half_width, height),
+        transform_station(&outboard, outboard_x, height),
+    ];
+    let base = [
+        transform_station(&center, center_x - chord_half_width, -0.5),
+        transform_station(&inboard, inboard_x, -0.5),
+        transform_station(&center, center_x + chord_half_width, -0.5),
+        transform_station(&outboard, outboard_x, -0.5),
     ];
 
     let mut mesh = MeshGL64 {
         num_prop: 3,
         ..Default::default()
     };
-
-    for station in &stations {
-        // The flange extends 12 mm beyond each chord edge. Centering 6 mm
-        // outside the airfoil puts the feature in the middle of that strip.
-        let center_x = match side {
-            FlangeSide::Leading => -6.0,
-            FlangeSide::Trailing => station.chord + 6.0,
-        };
-        for &(x, z) in &[
-            (center_x - half_width, 0.0),
-            (center_x, -height),
-            (center_x + half_width, 0.0),
-            (center_x, height),
-        ] {
-            mesh.vert_properties
-                .extend(transform_station(station, x, z));
-        }
+    for point in base.into_iter().chain(footprint).chain(top) {
+        mesh.vert_properties.extend(point);
     }
 
-    close_loft(&mut mesh, stations.len());
+    // Three four-vertex rings: embedded base, parting-plane footprint, top.
+    connect_ring(&mut mesh, 0, 4);
+    connect_ring(&mut mesh, 4, 8);
+    mesh.tri_verts.extend([0, 2, 1, 0, 3, 2]);
+    mesh.tri_verts.extend([8, 9, 10, 8, 10, 11]);
+
     let solid = Manifold::from_mesh_gl64(&mesh);
     if solid.status().to_str() != "No Error" {
         return Err(format!("invalid diamond key: {}", solid.status()).into());
     }
     Ok(solid)
+}
+
+fn flange_center_x(station: &WingStation, side: FlangeSide) -> f64 {
+    match side {
+        FlangeSide::Leading => -6.0,
+        FlangeSide::Trailing => station.chord + 6.0,
+    }
+}
+
+fn connect_ring(mesh: &mut MeshGL64, lower: u64, upper: u64) {
+    for i in 0..4_u64 {
+        let next = (i + 1) % 4;
+        mesh.tri_verts
+            .extend([lower + i, upper + i, upper + next]);
+        mesh.tri_verts
+            .extend([lower + i, upper + next, lower + next]);
+    }
 }
 
 fn interpolate_station(
