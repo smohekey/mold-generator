@@ -10,10 +10,16 @@ use mold_test_models::{WingSpec, WingStation};
 const SEGMENT_COUNT: usize = 2;
 
 #[derive(Debug, Clone, Copy)]
-struct RegistrationSettings {
+struct FixtureSettings {
     chord_half_width: f64,
     span_half_width: f64,
     normal_half_depth: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RegistrationSettings {
+    leading: FixtureSettings,
+    trailing: FixtureSettings,
     max_spacing_ratio: f64,
     edge_margin_ratio: f64,
     minimum_per_segment: usize,
@@ -21,10 +27,14 @@ struct RegistrationSettings {
 
 impl Default for RegistrationSettings {
     fn default() -> Self {
-        Self {
+        let fixture = FixtureSettings {
             chord_half_width: 5.0,
             span_half_width: 7.0,
             normal_half_depth: 2.25,
+        };
+        Self {
+            leading: fixture,
+            trailing: fixture,
             max_spacing_ratio: 10.0,
             edge_margin_ratio: 1.5,
             minimum_per_segment: 2,
@@ -91,7 +101,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         kernel.export_stl(&insert.solid, output.join(format!("{}.stl", insert.name)))?;
     }
 
-    let mut assembly = Vec::with_capacity(1 + mold.negative.len() + mold.positive.len() + inserts.len());
+    let mut assembly =
+        Vec::with_capacity(1 + mold.negative.len() + mold.positive.len() + inserts.len());
     assembly.push(ThreeMfObject {
         name: "wing".to_owned(),
         solid: &part,
@@ -138,49 +149,30 @@ fn registration_inserts(
     let span_start = spec.stations.first().ok_or("wing has no stations")?.span;
     let span_end = spec.stations.last().ok_or("wing has no stations")?.span;
     let segment_length = (span_end - span_start) / segment_count as f64;
-    let fixture_size = settings.span_half_width * 2.0;
-    let max_spacing = fixture_size * settings.max_spacing_ratio;
-    let edge_margin = fixture_size * settings.edge_margin_ratio;
     let mut inserts = Vec::new();
 
     for segment in 0..segment_count {
         let start = span_start + segment as f64 * segment_length;
         let end = start + segment_length;
-        let usable_start = start + edge_margin;
-        let usable_end = end - edge_margin;
-        let usable_length = (usable_end - usable_start).max(0.0);
-        let spacing_count = if max_spacing > 0.0 {
-            (usable_length / max_spacing).ceil() as usize
-        } else {
-            1
-        };
-        let count = settings.minimum_per_segment.max(spacing_count + 1);
 
         for side in [FlangeSide::Leading, FlangeSide::Trailing] {
-            for index in 0..count {
-                let t = if count == 1 {
-                    0.5
-                } else {
-                    index as f64 / (count - 1) as f64
-                };
-                let base_span = usable_start + usable_length * t;
-                let stagger = match side {
-                    FlangeSide::Leading => 0.0,
-                    FlangeSide::Trailing => {
-                        let nominal_spacing = if count > 1 {
-                            usable_length / (count - 1) as f64
-                        } else {
-                            0.0
-                        };
-                        0.15 * nominal_spacing * if index % 2 == 0 { 1.0 } else { -1.0 }
-                    }
-                };
-                let center_span = (base_span + stagger)
-                    .clamp(start + edge_margin, end - edge_margin);
-                let side_name = match side {
-                    FlangeSide::Leading => "leading",
-                    FlangeSide::Trailing => "trailing",
-                };
+            let fixture = match side {
+                FlangeSide::Leading => settings.leading,
+                FlangeSide::Trailing => settings.trailing,
+            };
+            let spans = fixture_spans(start, end, fixture, settings);
+            let side_name = match side {
+                FlangeSide::Leading => "leading",
+                FlangeSide::Trailing => "trailing",
+            };
+
+            println!(
+                "segment {} {side_name} flange: {} registration fixtures",
+                segment + 1,
+                spans.len()
+            );
+
+            for (index, center_span) in spans.into_iter().enumerate() {
                 let name = format!(
                     "registration-insert-s{:02}-{side_name}-{:02}",
                     segment + 1,
@@ -190,10 +182,10 @@ fn registration_inserts(
                     spec,
                     side,
                     center_span,
-                    settings.chord_half_width,
-                    settings.span_half_width,
-                    -settings.normal_half_depth,
-                    settings.normal_half_depth,
+                    fixture.chord_half_width,
+                    fixture.span_half_width,
+                    -fixture.normal_half_depth,
+                    fixture.normal_half_depth,
                 )?);
                 inserts.push(RegistrationInsert { name, solid });
             }
@@ -201,6 +193,37 @@ fn registration_inserts(
     }
 
     Ok(inserts)
+}
+
+fn fixture_spans(
+    flange_start: f64,
+    flange_end: f64,
+    fixture: FixtureSettings,
+    settings: RegistrationSettings,
+) -> Vec<f64> {
+    let fixture_size = fixture.span_half_width * 2.0;
+    let edge_margin = fixture_size * settings.edge_margin_ratio;
+    let max_spacing = fixture_size * settings.max_spacing_ratio;
+    let usable_start = flange_start + edge_margin;
+    let usable_end = flange_end - edge_margin;
+    let usable_length = (usable_end - usable_start).max(0.0);
+    let spacing_count = if max_spacing > 0.0 {
+        (usable_length / max_spacing).ceil() as usize
+    } else {
+        1
+    };
+    let count = settings.minimum_per_segment.max(spacing_count + 1);
+
+    (0..count)
+        .map(|index| {
+            let t = if count == 1 {
+                0.5
+            } else {
+                index as f64 / (count - 1) as f64
+            };
+            usable_start + usable_length * t
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy)]
