@@ -12,6 +12,9 @@ use mold_shell::{
 use mold_test_models::{WingSpec, WingStation};
 
 const SEGMENT_COUNT: usize = 2;
+const FLANGE_MARGIN: f64 = 12.0;
+type SegmentRibs = Vec<Vec<ManifoldSolid>>;
+type RibHalves = (SegmentRibs, SegmentRibs);
 
 #[derive(Debug, Clone, Copy)]
 struct FixtureSettings {
@@ -58,8 +61,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let lower_region = ManifoldSolid(chord_region(&spec, -500.0, 0.0, 80.0)?);
     let upper_region = ManifoldSolid(chord_region(&spec, 0.0, 500.0, 80.0)?);
-    let lower_flange = ManifoldSolid(chord_region(&spec, -3.0, 0.0, 12.0)?);
-    let upper_flange = ManifoldSolid(chord_region(&spec, 0.0, 3.0, 12.0)?);
+    let lower_flange = ManifoldSolid(chord_region(&spec, -3.0, 0.0, FLANGE_MARGIN)?);
+    let upper_flange = ManifoldSolid(chord_region(&spec, 0.0, 3.0, FLANGE_MARGIN)?);
 
     let kernel = ManifoldKernel;
     let part = ManifoldSolid(wing);
@@ -150,8 +153,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     validate_attached_webbing("upper", &mold.positive, &baseline.positive, &upper_webbing)?;
     println!(
         "structural webbing: {} lower + {} upper flange-anchored diagonal ribs, {:.2} mm thick ({} x {:.2} mm extrusion), depth {:.1} mm",
-        lower_ribs.len(),
-        upper_ribs.len(),
+        lower_ribs.iter().map(Vec::len).sum::<usize>(),
+        upper_ribs.iter().map(Vec::len).sum::<usize>(),
         webbing.thickness(),
         webbing.wall_line_count,
         webbing.extrusion_width,
@@ -387,13 +390,17 @@ fn diagonal_ribs(
     registration: RegistrationSettings,
     thickness: f64,
     depth: f64,
-) -> Result<(Vec<ManifoldSolid>, Vec<ManifoldSolid>), Box<dyn std::error::Error>> {
+) -> Result<RibHalves, Box<dyn std::error::Error>> {
     let mut lower = Vec::new();
     let mut upper = Vec::new();
 
     for &(start, end) in segment_ranges {
-        let leading = fixture_spans(start, end, registration.leading, registration);
-        let trailing = fixture_spans(start, end, registration.trailing, registration);
+        let mut lower_segment = Vec::new();
+        let mut upper_segment = Vec::new();
+        let leading_fixtures = fixture_spans(start, end, registration.leading, registration);
+        let trailing_fixtures = fixture_spans(start, end, registration.trailing, registration);
+        let leading = spans_between(&leading_fixtures);
+        let trailing = spans_between(&trailing_fixtures);
         let vertex_count = leading.len().min(trailing.len());
 
         for index in 0..vertex_count.saturating_sub(1) {
@@ -412,25 +419,34 @@ fn diagonal_ribs(
                     leading[index + 1],
                 )
             };
-            lower.push(ManifoldSolid(profiled_rib(
+            lower_segment.push(ManifoldSolid(profiled_rib(
                 spec, a_side, a_span, b_side, b_span, thickness, -depth,
             )?));
-            upper.push(ManifoldSolid(profiled_rib(
+            upper_segment.push(ManifoldSolid(profiled_rib(
                 spec, a_side, a_span, b_side, b_span, thickness, depth,
             )?));
         }
+        lower.push(lower_segment);
+        upper.push(upper_segment);
     }
     Ok((lower, upper))
+}
+
+fn spans_between(fixtures: &[f64]) -> Vec<f64> {
+    fixtures
+        .windows(2)
+        .map(|pair| (pair[0] + pair[1]) * 0.5)
+        .collect()
 }
 
 fn attach_ribs(
     kernel: &ManifoldKernel,
     part: &ManifoldSolid,
     pieces: &mut [ManifoldSolid],
-    ribs: &[ManifoldSolid],
+    ribs_by_piece: &[Vec<ManifoldSolid>],
     exclusions: &[&ManifoldSolid],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    for piece in pieces {
+    for (piece, ribs) in pieces.iter_mut().zip(ribs_by_piece) {
         for rib in ribs {
             let mut printable = kernel.difference(rib, part)?;
             for exclusion in exclusions {
@@ -490,8 +506,8 @@ fn profiled_rib(
             let t = index as f64 / SAMPLES as f64;
             let span = lerp(start_span, end_span, t);
             let station = interpolate_station(spec, span)?;
-            let start_x = flange_center_x(&station, start_side);
-            let end_x = flange_center_x(&station, end_side);
+            let start_x = rib_endpoint_x(&station, start_side, thickness);
+            let end_x = rib_endpoint_x(&station, end_side, thickness);
             let x = lerp(start_x, end_x, t);
             profile_surface_point(spec, &station, x, upper)
         })
@@ -510,8 +526,8 @@ fn profiled_rib(
         let span = lerp(start_span, end_span, t);
         let station = interpolate_station(spec, span)?;
         let x = lerp(
-            flange_center_x(&station, start_side),
-            flange_center_x(&station, end_side),
+            rib_endpoint_x(&station, start_side, thickness),
+            rib_endpoint_x(&station, end_side, thickness),
             t,
         );
         let normal = profile_surface_normal(spec, &station, x, upper)?;
@@ -691,6 +707,14 @@ fn flange_center_x(station: &WingStation, side: FlangeSide) -> f64 {
     match side {
         FlangeSide::Leading => -6.0,
         FlangeSide::Trailing => station.chord + 6.0,
+    }
+}
+
+fn rib_endpoint_x(station: &WingStation, side: FlangeSide, thickness: f64) -> f64 {
+    let half = thickness * 0.5;
+    match side {
+        FlangeSide::Leading => -FLANGE_MARGIN + half,
+        FlangeSide::Trailing => station.chord + FLANGE_MARGIN - half,
     }
 }
 
