@@ -37,7 +37,6 @@ impl ThreeMfColor {
 pub struct ThreeMfObject<'a> {
     pub name: String,
     pub solid: &'a ManifoldSolid,
-    pub color: Option<ThreeMfColor>,
 }
 
 #[derive(Debug)]
@@ -109,20 +108,14 @@ fn write_model_xml(
         escape_xml(title)
     )?;
 
-    let colored_objects: Vec<_> = objects
-        .iter()
-        .enumerate()
-        .filter_map(|(index, object)| object.color.map(|color| (index, color)))
-        .collect();
-
-    if !colored_objects.is_empty() {
+    if !objects.is_empty() {
         writeln!(out, "    <basematerials id=\"1\">")?;
-        for (index, color) in &colored_objects {
+        for (index, object) in objects.iter().enumerate() {
             writeln!(
                 out,
                 "      <base name=\"{}\" displaycolor=\"{}\" />",
-                escape_xml(&objects[*index].name),
-                color.display_color()
+                escape_xml(&object.name),
+                validation_color(index).display_color()
             )?;
         }
         writeln!(out, "    </basematerials>")?;
@@ -132,23 +125,12 @@ fn write_model_xml(
         let object_id = index + 1;
         let mesh = object.solid.0.as_original().get_mesh_gl64(-1);
         let stride = mesh.num_prop as usize;
-        let material_index = colored_objects
-            .iter()
-            .position(|(object_index, _)| *object_index == index);
 
-        if let Some(material_index) = material_index {
-            writeln!(
-                out,
-                "    <object id=\"{object_id}\" name=\"{}\" type=\"model\" pid=\"1\" pindex=\"{material_index}\">",
-                escape_xml(&object.name)
-            )?;
-        } else {
-            writeln!(
-                out,
-                "    <object id=\"{object_id}\" name=\"{}\" type=\"model\">",
-                escape_xml(&object.name)
-            )?;
-        }
+        writeln!(
+            out,
+            "    <object id=\"{object_id}\" name=\"{}\" type=\"model\" pid=\"1\" pindex=\"{index}\">",
+            escape_xml(&object.name)
+        )?;
         writeln!(out, "      <mesh>")?;
         writeln!(out, "        <vertices>")?;
         for vertex in mesh.vert_properties.chunks_exact(stride) {
@@ -180,6 +162,22 @@ fn write_model_xml(
     writeln!(out, "  </build>")?;
     writeln!(out, "</model>")?;
     Ok(())
+}
+
+fn validation_color(index: usize) -> ThreeMfColor {
+    const PALETTE: [ThreeMfColor; 10] = [
+        ThreeMfColor::rgb(150, 150, 150),
+        ThreeMfColor::rgb(65, 105, 225),
+        ThreeMfColor::rgb(70, 160, 220),
+        ThreeMfColor::rgb(230, 120, 45),
+        ThreeMfColor::rgb(245, 165, 65),
+        ThreeMfColor::rgb(45, 185, 95),
+        ThreeMfColor::rgb(125, 210, 85),
+        ThreeMfColor::rgb(165, 85, 205),
+        ThreeMfColor::rgb(220, 80, 145),
+        ThreeMfColor::rgb(70, 190, 180),
+    ];
+    PALETTE[index % PALETTE.len()]
 }
 
 fn escape_xml(value: &str) -> String {
@@ -216,5 +214,10 @@ mod tests {
     #[test]
     fn color_serializes_as_rgba_hex() {
         assert_eq!(ThreeMfColor::rgb(0x12, 0x34, 0xAB).display_color(), "#1234ABFF");
+    }
+
+    #[test]
+    fn validation_palette_wraps() {
+        assert_eq!(validation_color(0), validation_color(10));
     }
 }
