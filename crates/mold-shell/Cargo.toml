@@ -10,5 +10,6 @@ mold-core.workspace = true
 mold-geometry.workspace = true
 
 [dev-dependencies]
+manifold-rust.workspace = true
 mold-manifold.workspace = true
 mold-test-models.workspace = true
