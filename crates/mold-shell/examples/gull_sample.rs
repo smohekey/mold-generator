@@ -5,20 +5,21 @@ use mold_core::{Axis, SectionedTwoPartMold};
 use mold_geometry::SolidKernel;
 use mold_manifold::{ManifoldKernel, ManifoldSolid};
 use mold_shell::{
-    FlangeDivisionSettings, FlangeEdge, PartingRegions, PrintVolume, SegmentBoundary,
-    SegmentationSettings, ShellSettings, WebbingSettings, alternating_rib_layouts,
-    attach_structural_webbing, divide_flange, generate_sectioned_shell_mold_with_parting_ranges,
-    partition_for_print_volume,
+    FlangeDivisionSettings, FlangeEdge, PartingRegions, PrintTile, PrintVolume, SegmentBoundary,
+    SegmentationSettings, ShellSettings, TiledSegmentationSettings, WebbingSettings,
+    alternating_rib_layouts, attach_structural_webbing, divide_flange,
+    generate_sectioned_shell_mold_with_parting_ranges, partition_tiles_for_print_volume,
 };
 use mold_test_models::{
-    PrintableEnvelope, RibPathSpec, WingEdge, WingSpec, WingSurface, chord_region,
-    printable_segment_dimensions, registration_diamond, sample_rib_surface_path, segment_normal,
-    wing_segment_boundaries,
+    PrintableEnvelope, RibPathSpec, WingEdge, WingSpec, WingSurface, chord_band_region,
+    chord_region, printable_tile_dimensions, registration_diamond, sample_rib_surface_path,
+    segment_normal, wing_segment_boundaries,
 };
 
 const FLANGE_MARGIN: f64 = 12.0;
 const RIB_SAMPLES: usize = 24;
 const CANDIDATE_STEP: f64 = 25.0;
+const MODEL_SCALE: f64 = 1.2;
 
 #[derive(Debug, Clone, Copy)]
 struct FixtureSettings {
@@ -65,6 +66,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut spec = mold_test_models::preset("gull")?;
     spec.profile_points = 24;
+    for station in &mut spec.stations {
+        station.span *= MODEL_SCALE;
+        station.chord *= MODEL_SCALE;
+        station.x_offset *= MODEL_SCALE;
+        station.z_offset *= MODEL_SCALE;
+    }
     let kernel = ManifoldKernel;
     let part = ManifoldSolid(mold_test_models::generate(&spec)?);
     mold_test_models::write_stl(&part.0, output.join("gull-wing.stl"))?;
@@ -82,10 +89,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let expanded_bounds = kernel.bounds(&kernel.offset(&part, shell_settings.thickness)?)?;
     let segmentation = SegmentationSettings {
         print_volume: PrintVolume {
-            width: 320.0,
-            depth: 320.0,
-            height: 500.0,
-            clearance: 5.0,
+            width: 256.0,
+            depth: 256.0,
+            height: 256.0,
+            clearance: 6.0,
         },
         preferred_segment_count: None,
         max_segment_count: 8,
@@ -109,18 +116,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             preference: candidate.deviation,
         })
         .collect();
-    let ranges = partition_for_print_volume(&boundaries, segmentation, |start, end| {
-        printable_segment_dimensions(&spec, start, end, envelope).ok()
-    })?;
+    let tiles = partition_tiles_for_print_volume(
+        &boundaries,
+        TiledSegmentationSettings {
+            span: segmentation,
+            max_longitudinal_segments: 4,
+        },
+        |start, end, chord| printable_tile_dimensions(&spec, start, end, chord, envelope).ok(),
+    )?;
+    let mut ranges = Vec::new();
+    for tile in &tiles {
+        if ranges.last() != Some(&tile.span) {
+            ranges.push(tile.span);
+        }
+    }
     println!(
         "print-volume-aware segment ranges for {:?}: {ranges:?}",
         segmentation.print_volume
     );
-    for (index, &(start, end)) in ranges.iter().enumerate() {
+    println!("print tiles: {tiles:?}");
+    for (index, tile) in tiles.iter().enumerate() {
         println!(
-            "segment {} print dimensions: {:?}",
+            "tile {} print dimensions: {:?}",
             index + 1,
-            printable_segment_dimensions(&spec, start, end, envelope)?
+            printable_tile_dimensions(&spec, tile.span.0, tile.span.1, tile.chord, envelope)?
         );
     }
 
@@ -165,6 +184,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &socket_cutters,
     )?;
 
+    let baseline = split_mold_into_tiles(&kernel, &spec, baseline, &ranges, &tiles)?;
+    let mold = split_mold_into_tiles(&kernel, &spec, mold, &ranges, &tiles)?;
+
     let lower_webbing = additions(&kernel, &mold.negative, &baseline.negative)?;
     let upper_webbing = additions(&kernel, &mold.positive, &baseline.positive)?;
     validate_attached("lower", &mold.negative, &baseline.negative, &lower_webbing)?;
@@ -179,6 +201,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &upper_webbing,
     )?;
     Ok(())
+}
+
+fn split_mold_into_tiles(
+    kernel: &ManifoldKernel,
+    spec: &WingSpec,
+    mold: SectionedTwoPartMold<ManifoldSolid>,
+    ranges: &[(f64, f64)],
+    tiles: &[PrintTile],
+) -> Result<SectionedTwoPartMold<ManifoldSolid>, Box<dyn std::error::Error>> {
+    let split_half =
+        |pieces: &[ManifoldSolid]| -> Result<Vec<ManifoldSolid>, Box<dyn std::error::Error>> {
+            let mut split = Vec::with_capacity(tiles.len());
+            for tile in tiles {
+                let section = ranges
+                    .iter()
+                    .position(|range| *range == tile.span)
+                    .ok_or("print tile does not match a span section")?;
+                let region = ManifoldSolid(chord_band_region(
+                    spec, tile.chord, -1_000.0, 1_000.0, 100.0,
+                )?);
+                split.push(kernel.intersection(&pieces[section], &region)?);
+            }
+            Ok(split)
+        };
+    Ok(SectionedTwoPartMold {
+        negative: split_half(&mold.negative)?,
+        positive: split_half(&mold.positive)?,
+    })
 }
 
 fn build_registration_inserts(

@@ -4,11 +4,12 @@ use mold_core::Axis;
 use mold_geometry::{SolidKernel, Vec3};
 use mold_manifold::{ManifoldKernel, ManifoldSolid};
 use mold_shell::{
-    PrintVolume, SegmentBoundary, SegmentationSettings, ShellSettings,
-    generate_sectioned_shell_mold, partition_for_print_volume,
+    PrintVolume, SegmentBoundary, SegmentationSettings, ShellSettings, TiledSegmentationSettings,
+    generate_sectioned_shell_mold, partition_for_print_volume, partition_tiles_for_print_volume,
 };
 use mold_test_models::{
-    PrintableEnvelope, generate, preset, printable_segment_dimensions, wing_segment_boundaries,
+    PrintableEnvelope, generate, preset, printable_segment_dimensions, printable_tile_dimensions,
+    wing_segment_boundaries,
 };
 
 #[test]
@@ -112,16 +113,11 @@ fn print_volume_constrains_gull_wing_segmentation_and_preserves_the_bend() {
         web_depth: 8.0,
         span_samples: 24,
     };
-    let partition = |height| {
+    let partition = |print_volume| {
         partition_for_print_volume(
             &boundaries,
             SegmentationSettings {
-                print_volume: PrintVolume {
-                    width: 320.0,
-                    depth: 320.0,
-                    height,
-                    clearance: 5.0,
-                },
+                print_volume,
                 preferred_segment_count: None,
                 max_segment_count: 8,
             },
@@ -130,21 +126,81 @@ fn print_volume_constrains_gull_wing_segmentation_and_preserves_the_bend() {
         .unwrap()
     };
 
-    let tall_printer = partition(500.0);
-    let short_printer = partition(300.0);
+    let tall_volume = PrintVolume {
+        width: 320.0,
+        depth: 320.0,
+        height: 500.0,
+        clearance: 5.0,
+    };
+    let short_volume = PrintVolume {
+        height: 300.0,
+        ..tall_volume
+    };
+    let compact_volume = PrintVolume {
+        width: 256.0,
+        depth: 256.0,
+        height: 256.0,
+        clearance: 6.0,
+    };
+    let tall_printer = partition(tall_volume);
+    let short_printer = partition(short_volume);
+    let compact_printer = partition(compact_volume);
 
     assert_eq!(tall_printer, vec![(-3.0, 180.0), (180.0, 603.0)]);
     assert!(short_printer.len() > tall_printer.len());
     for range in short_printer {
         let dimensions = printable_segment_dimensions(&spec, range.0, range.1, envelope).unwrap();
-        assert!(
-            PrintVolume {
-                width: 320.0,
-                depth: 320.0,
-                height: 300.0,
-                clearance: 5.0,
-            }
-            .fits(dimensions)
-        );
+        assert!(short_volume.fits(dimensions));
+    }
+    assert_eq!(compact_printer.len(), 3);
+    for range in compact_printer {
+        let dimensions = printable_segment_dimensions(&spec, range.0, range.1, envelope).unwrap();
+        assert!(compact_volume.fits(dimensions));
+    }
+}
+
+#[test]
+fn narrow_printer_uses_longitudinal_tiles_when_rotation_cannot_fit() {
+    let spec = preset("gull").unwrap();
+    let candidates = wing_segment_boundaries(&spec, -3.0, 603.0, 25.0).unwrap();
+    let boundaries: Vec<SegmentBoundary> = candidates
+        .iter()
+        .map(|candidate| SegmentBoundary {
+            position: candidate.position,
+            preference: candidate.deviation,
+        })
+        .collect();
+    let envelope = PrintableEnvelope {
+        flange_margin: 12.0,
+        shell_thickness: 3.0,
+        web_depth: 8.0,
+        span_samples: 24,
+    };
+    let volume = PrintVolume {
+        width: 160.0,
+        depth: 160.0,
+        height: 300.0,
+        clearance: 6.0,
+    };
+    let tiles = partition_tiles_for_print_volume(
+        &boundaries,
+        TiledSegmentationSettings {
+            span: SegmentationSettings {
+                print_volume: volume,
+                preferred_segment_count: None,
+                max_segment_count: 8,
+            },
+            max_longitudinal_segments: 4,
+        },
+        |start, end, chord| printable_tile_dimensions(&spec, start, end, chord, envelope).ok(),
+    )
+    .unwrap();
+
+    assert!(tiles.iter().any(|tile| tile.chord != (0.0, 1.0)));
+    for tile in tiles {
+        let dimensions =
+            printable_tile_dimensions(&spec, tile.span.0, tile.span.1, tile.chord, envelope)
+                .unwrap();
+        assert!(volume.fits(dimensions));
     }
 }

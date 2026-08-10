@@ -129,6 +129,16 @@ pub fn printable_segment_dimensions(
     end_span: f64,
     envelope: PrintableEnvelope,
 ) -> Result<[f64; 3], WingError> {
+    printable_tile_dimensions(spec, start_span, end_span, (0.0, 1.0), envelope)
+}
+
+pub fn printable_tile_dimensions(
+    spec: &WingSpec,
+    start_span: f64,
+    end_span: f64,
+    chord_range: (f64, f64),
+    envelope: PrintableEnvelope,
+) -> Result<[f64; 3], WingError> {
     if envelope.span_samples == 0 || end_span <= start_span {
         return Err(WingError::InvalidSpec(
             "printable envelope needs samples and a positive span",
@@ -137,6 +147,11 @@ pub fn printable_segment_dimensions(
     if envelope.flange_margin < 0.0 || envelope.shell_thickness < 0.0 || envelope.web_depth < 0.0 {
         return Err(WingError::InvalidSpec(
             "printable envelope allowances cannot be negative",
+        ));
+    }
+    if chord_range.0 < 0.0 || chord_range.1 > 1.0 || chord_range.1 <= chord_range.0 {
+        return Err(WingError::InvalidSpec(
+            "tile chord range must be increasing and within zero to one",
         ));
     }
     let model_start = spec
@@ -181,8 +196,18 @@ pub fn printable_segment_dimensions(
         );
         let station = interpolate_station(spec, span)?;
         let profile_samples = spec.profile_points.max(8);
+        let x_start = if chord_range.0 == 0.0 {
+            -envelope.flange_margin
+        } else {
+            station.chord * chord_range.0
+        };
+        let x_end = if chord_range.1 == 1.0 {
+            station.chord + envelope.flange_margin
+        } else {
+            station.chord * chord_range.1
+        };
         for chord_index in 0..=profile_samples {
-            let x = station.chord * chord_index as f64 / profile_samples as f64;
+            let x = lerp(x_start, x_end, chord_index as f64 / profile_samples as f64);
             let lower_surface = surface_point(spec, &station, x, WingSurface::Lower)?;
             let upper_surface = surface_point(spec, &station, x, WingSurface::Upper)?;
             lower.include(lower_surface, width, depth, vertical);
@@ -200,10 +225,7 @@ pub fn printable_segment_dimensions(
                 vertical,
             );
         }
-        for x in [
-            -envelope.flange_margin,
-            station.chord + envelope.flange_margin,
-        ] {
+        for x in [x_start, x_end] {
             let flange = transform_station(&station, x, 0.0);
             for bounds in [&mut lower, &mut upper] {
                 bounds.include(flange, width, depth, vertical);
@@ -421,6 +443,40 @@ pub fn chord_region(
     }
     close_quad_loft(&mut mesh, spec.stations.len());
     checked_mesh(mesh, "chord region")
+}
+
+pub fn chord_band_region(
+    spec: &WingSpec,
+    chord_range: (f64, f64),
+    z_min: f64,
+    z_max: f64,
+    chord_margin: f64,
+) -> Result<Manifold, WingError> {
+    if chord_range.0 < 0.0 || chord_range.1 > 1.0 || chord_range.1 <= chord_range.0 {
+        return Err(WingError::InvalidSpec("invalid chord band range"));
+    }
+    let mut mesh = MeshGL64 {
+        num_prop: 3,
+        ..Default::default()
+    };
+    for station in &spec.stations {
+        let start = if chord_range.0 == 0.0 {
+            -chord_margin
+        } else {
+            station.chord * chord_range.0
+        };
+        let end = if chord_range.1 == 1.0 {
+            station.chord + chord_margin
+        } else {
+            station.chord * chord_range.1
+        };
+        for &(x, z) in &[(start, z_min), (end, z_min), (end, z_max), (start, z_max)] {
+            mesh.vert_properties
+                .extend(transform_station(station, x, z));
+        }
+    }
+    close_quad_loft(&mut mesh, spec.stations.len());
+    checked_mesh(mesh, "chord band region")
 }
 
 pub fn registration_diamond(

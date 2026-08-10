@@ -57,8 +57,8 @@ impl PrintVolume {
             .then_some(dimensions)
     }
 
-    /// Tests a segment aligned to printer height. Rotation by 90 degrees on
-    /// the print bed is permitted, so width and depth may be exchanged.
+    /// Tests a segment aligned to printer height, allowing rotation around
+    /// that vertical axis to make best use of the rectangular print bed.
     pub fn fits(self, segment_dimensions: [f64; 3]) -> bool {
         let Some([width, depth, height]) = self.usable_dimensions() else {
             return false;
@@ -70,9 +70,18 @@ impl PrintVolume {
             return false;
         }
         let [segment_width, segment_depth, segment_height] = segment_dimensions;
-        segment_height <= height
-            && ((segment_width <= width && segment_depth <= depth)
-                || (segment_width <= depth && segment_depth <= width))
+        if segment_height > height {
+            return false;
+        }
+        const ORIENTATION_STEPS: usize = 900;
+        (0..=ORIENTATION_STEPS).any(|step| {
+            let angle = std::f64::consts::FRAC_PI_2 * step as f64 / ORIENTATION_STEPS as f64;
+            let cosine = angle.cos();
+            let sine = angle.sin();
+            let rotated_width = segment_width * cosine + segment_depth * sine;
+            let rotated_depth = segment_width * sine + segment_depth * cosine;
+            rotated_width <= width && rotated_depth <= depth
+        })
     }
 }
 
@@ -81,6 +90,19 @@ pub struct SegmentationSettings {
     pub print_volume: PrintVolume,
     pub preferred_segment_count: Option<usize>,
     pub max_segment_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TiledSegmentationSettings {
+    pub span: SegmentationSettings,
+    pub max_longitudinal_segments: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PrintTile {
+    pub span: (f64, f64),
+    /// Normalized leading-to-trailing chord range.
+    pub chord: (f64, f64),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -111,16 +133,10 @@ impl std::fmt::Display for SegmentationError {
 
 impl std::error::Error for SegmentationError {}
 
-/// Finds the smallest printable partition, preferring requested segment count
-/// and high-value boundaries (for example, axial bends) when alternatives fit.
-pub fn partition_for_print_volume<F>(
+fn validate_segmentation(
     boundaries: &[SegmentBoundary],
     settings: SegmentationSettings,
-    mut dimensions: F,
-) -> Result<Vec<(f64, f64)>, SegmentationError>
-where
-    F: FnMut(f64, f64) -> Option<[f64; 3]>,
-{
+) -> Result<(), SegmentationError> {
     if boundaries.len() < 2 {
         return Err(SegmentationError::InvalidSettings(
             "at least two boundaries are required",
@@ -147,6 +163,144 @@ where
             "boundaries must be strictly increasing",
         ));
     }
+    Ok(())
+}
+
+/// Finds a printable two-dimensional partition. Each span region independently
+/// chooses the fewest equal-width longitudinal bands that fit, so wide root
+/// regions do not force unnecessary cuts into narrower outboard regions.
+pub fn partition_tiles_for_print_volume<F>(
+    boundaries: &[SegmentBoundary],
+    settings: TiledSegmentationSettings,
+    mut dimensions: F,
+) -> Result<Vec<PrintTile>, SegmentationError>
+where
+    F: FnMut(f64, f64, (f64, f64)) -> Option<[f64; 3]>,
+{
+    validate_segmentation(boundaries, settings.span)?;
+    if settings.max_longitudinal_segments == 0 {
+        return Err(SegmentationError::InvalidSettings(
+            "maximum longitudinal segment count must be positive",
+        ));
+    }
+    let count = boundaries.len();
+    let mut bands = vec![vec![None; count]; count];
+    for start in 0..count - 1 {
+        for end in start + 1..count {
+            bands[start][end] = (1..=settings.max_longitudinal_segments).find(|&band_count| {
+                (0..band_count).all(|band| {
+                    let chord = (
+                        band as f64 / band_count as f64,
+                        (band + 1) as f64 / band_count as f64,
+                    );
+                    dimensions(boundaries[start].position, boundaries[end].position, chord)
+                        .is_some_and(|size| settings.span.print_volume.fits(size))
+                })
+            });
+        }
+    }
+
+    #[derive(Clone)]
+    struct Route {
+        tiles: usize,
+        preference: f64,
+        shortest_span: f64,
+        edges: Vec<(usize, usize)>,
+    }
+    let end = count - 1;
+    let mut routes: Vec<Vec<Option<Route>>> =
+        vec![vec![None; count]; settings.span.max_segment_count + 1];
+    routes[0][0] = Some(Route {
+        tiles: 0,
+        preference: 0.0,
+        shortest_span: f64::INFINITY,
+        edges: Vec::new(),
+    });
+    for used in 0..settings.span.max_segment_count {
+        for (start, bands_from_start) in bands.iter().enumerate().take(end) {
+            let Some(route) = routes[used][start].clone() else {
+                continue;
+            };
+            for (next, boundary) in boundaries.iter().enumerate().take(end + 1).skip(start + 1) {
+                let Some(band_count) = bands_from_start[next] else {
+                    continue;
+                };
+                let candidate = Route {
+                    tiles: route.tiles + band_count,
+                    preference: route.preference
+                        + if next == end {
+                            0.0
+                        } else {
+                            boundary.preference
+                        },
+                    shortest_span: route
+                        .shortest_span
+                        .min(boundaries[next].position - boundaries[start].position),
+                    edges: {
+                        let mut edges = route.edges.clone();
+                        edges.push((next, band_count));
+                        edges
+                    },
+                };
+                let entry = &mut routes[used + 1][next];
+                if entry.as_ref().is_none_or(|current| {
+                    candidate.tiles < current.tiles
+                        || (candidate.tiles == current.tiles
+                            && (candidate.preference > current.preference
+                                || (candidate.preference == current.preference
+                                    && candidate.shortest_span > current.shortest_span)))
+                }) {
+                    *entry = Some(candidate);
+                }
+            }
+        }
+    }
+    let preferred = settings.span.preferred_segment_count;
+    let best = routes
+        .iter_mut()
+        .enumerate()
+        .skip(1)
+        .filter_map(|(span_count, routes)| routes[end].take().map(|route| (span_count, route)))
+        .min_by(|(a_count, a), (b_count, b)| {
+            a.tiles
+                .cmp(&b.tiles)
+                .then_with(|| match preferred {
+                    Some(target) => a_count.abs_diff(target).cmp(&b_count.abs_diff(target)),
+                    None => a_count.cmp(b_count),
+                })
+                .then_with(|| b.preference.total_cmp(&a.preference))
+                .then_with(|| b.shortest_span.total_cmp(&a.shortest_span))
+        })
+        .map(|(_, route)| route)
+        .ok_or(SegmentationError::NoPrintablePartition)?;
+    let mut tiles = Vec::with_capacity(best.tiles);
+    let mut start = 0;
+    for (next, band_count) in best.edges {
+        for band in 0..band_count {
+            tiles.push(PrintTile {
+                span: (boundaries[start].position, boundaries[next].position),
+                chord: (
+                    band as f64 / band_count as f64,
+                    (band + 1) as f64 / band_count as f64,
+                ),
+            });
+        }
+        start = next;
+    }
+    Ok(tiles)
+}
+
+/// Finds the smallest printable partition, preferring requested segment count
+/// and high-value boundaries (for example, axial bends) when alternatives fit.
+pub fn partition_for_print_volume<F>(
+    boundaries: &[SegmentBoundary],
+    settings: SegmentationSettings,
+    mut dimensions: F,
+) -> Result<Vec<(f64, f64)>, SegmentationError>
+where
+    F: FnMut(f64, f64) -> Option<[f64; 3]>,
+{
+    validate_segmentation(boundaries, settings)?;
 
     let count = boundaries.len();
     let mut fits = vec![vec![false; count]; count];
@@ -278,6 +432,19 @@ pub fn alternating_rib_layouts(
         .map(|pair| (pair[0] + pair[1]) * 0.5)
         .collect();
     let count = leading.len().min(trailing.len());
+
+    if count == 1 && leading_fixtures.len() >= 2 && trailing_fixtures.len() >= 2 {
+        return vec![RibLayout {
+            start: RibEndpoint {
+                edge: FlangeEdge::Leading,
+                span: leading_fixtures[0],
+            },
+            end: RibEndpoint {
+                edge: FlangeEdge::Trailing,
+                span: *trailing_fixtures.last().expect("fixture count checked"),
+            },
+        }];
+    }
 
     (0..count.saturating_sub(1))
         .map(|index| {
@@ -995,6 +1162,17 @@ mod tests {
     }
 
     #[test]
+    fn short_segment_still_gets_one_diagonal_rib() {
+        let fixtures = [20.0, 140.0];
+        let layouts = alternating_rib_layouts(&fixtures, &fixtures);
+
+        assert_eq!(layouts.len(), 1);
+        assert_eq!(layouts[0].start.span, 20.0);
+        assert_eq!(layouts[0].end.span, 140.0);
+        assert_ne!(layouts[0].start.edge, layouts[0].end.edge);
+    }
+
+    #[test]
     fn print_volume_allows_rotating_a_segment_on_the_bed() {
         let volume = PrintVolume {
             width: 220.0,
@@ -1004,8 +1182,20 @@ mod tests {
         };
 
         assert!(volume.fits([145.0, 205.0, 230.0]));
-        assert!(!volume.fits([155.0, 215.0, 230.0]));
+        assert!(!volume.fits([180.0, 215.0, 230.0]));
         assert!(!volume.fits([145.0, 205.0, 245.0]));
+    }
+
+    #[test]
+    fn print_volume_accepts_a_wide_shallow_segment_rotated_on_a_square_bed() {
+        let volume = PrintVolume {
+            width: 256.0,
+            depth: 256.0,
+            height: 256.0,
+            clearance: 6.0,
+        };
+
+        assert!(volume.fits([264.0, 31.0, 201.0]));
     }
 
     #[test]
@@ -1074,6 +1264,57 @@ mod tests {
             partition_for_print_volume(&boundaries, settings, |_, _| Some([100.0, 100.0, 100.0]));
 
         assert_eq!(result, Err(SegmentationError::NoPrintablePartition));
+    }
+
+    #[test]
+    fn tiled_partitioner_only_splits_wide_span_regions_longitudinally() {
+        let boundaries = [
+            SegmentBoundary {
+                position: 0.0,
+                preference: 0.0,
+            },
+            SegmentBoundary {
+                position: 100.0,
+                preference: 2.0,
+            },
+            SegmentBoundary {
+                position: 200.0,
+                preference: 0.0,
+            },
+        ];
+        let tiles = partition_tiles_for_print_volume(
+            &boundaries,
+            TiledSegmentationSettings {
+                span: SegmentationSettings {
+                    print_volume: PrintVolume {
+                        width: 200.0,
+                        depth: 200.0,
+                        height: 120.0,
+                        clearance: 0.0,
+                    },
+                    preferred_segment_count: None,
+                    max_segment_count: 2,
+                },
+                max_longitudinal_segments: 3,
+            },
+            |start, end, chord| {
+                let full_width = if start < 100.0 { 300.0 } else { 150.0 };
+                Some([full_width * (chord.1 - chord.0), 30.0, end - start])
+            },
+        )
+        .unwrap();
+
+        assert_eq!(tiles.len(), 3);
+        assert_eq!(tiles[0].span, (0.0, 100.0));
+        assert_eq!(tiles[0].chord, (0.0, 0.5));
+        assert_eq!(tiles[1].chord, (0.5, 1.0));
+        assert_eq!(
+            tiles[2],
+            PrintTile {
+                span: (100.0, 200.0),
+                chord: (0.0, 1.0),
+            }
+        );
     }
 
     #[test]
