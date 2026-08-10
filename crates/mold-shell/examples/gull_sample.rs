@@ -22,9 +22,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let lower_flange = chord_region(&spec, -3.0, 0.0, 12.0)?;
     let upper_flange = chord_region(&spec, 0.0, 3.0, 12.0)?;
 
-    // Two deliberately asymmetric FDM-friendly registration keys. Their
-    // diamond footprint lies in the local flange plane (chord x span), then
-    // the feature is extruded along the local parting normal.
     let key_a = diamond_key(&spec, FlangeSide::Leading, 95.0, 5.0, 7.0, 3.0)?;
     let key_b = diamond_key(&spec, FlangeSide::Trailing, 410.0, 4.5, 6.0, 3.5)?;
     let socket_a = diamond_key(&spec, FlangeSide::Leading, 95.0, 5.3, 7.3, 3.25)?;
@@ -121,11 +118,11 @@ fn diamond_key(
     let inboard_x = flange_center_x(&inboard, side);
     let outboard_x = flange_center_x(&outboard, side);
 
-    let footprint = [
-        transform_station(&center, center_x - chord_half_width, 0.0),
-        transform_station(&inboard, inboard_x, 0.0),
-        transform_station(&center, center_x + chord_half_width, 0.0),
-        transform_station(&outboard, outboard_x, 0.0),
+    let base = [
+        transform_station(&center, center_x - chord_half_width, -0.5),
+        transform_station(&inboard, inboard_x, -0.5),
+        transform_station(&center, center_x + chord_half_width, -0.5),
+        transform_station(&outboard, outboard_x, -0.5),
     ];
     let top = [
         transform_station(&center, center_x - chord_half_width, height),
@@ -133,25 +130,18 @@ fn diamond_key(
         transform_station(&center, center_x + chord_half_width, height),
         transform_station(&outboard, outboard_x, height),
     ];
-    let base = [
-        transform_station(&center, center_x - chord_half_width, -0.5),
-        transform_station(&inboard, inboard_x, -0.5),
-        transform_station(&center, center_x + chord_half_width, -0.5),
-        transform_station(&outboard, outboard_x, -0.5),
-    ];
 
     let mut mesh = MeshGL64 {
         num_prop: 3,
         ..Default::default()
     };
-    for point in base.into_iter().chain(footprint).chain(top) {
+    for point in base.into_iter().chain(top) {
         mesh.vert_properties.extend(point);
     }
 
     connect_ring(&mut mesh, 0, 4);
-    connect_ring(&mut mesh, 4, 8);
     mesh.tri_verts.extend([0, 2, 1, 0, 3, 2]);
-    mesh.tri_verts.extend([8, 9, 10, 8, 10, 11]);
+    mesh.tri_verts.extend([4, 5, 6, 4, 6, 7]);
 
     let solid = Manifold::from_mesh_gl64(&mesh);
     if solid.status().to_str() != "No Error" {
