@@ -1,27 +1,31 @@
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use mold_3mf::{ThreeMfObject, write_3mf};
 use mold_core::{Axis, SectionedTwoPartMold};
 use mold_geometry::SolidKernel;
 use mold_manifold::{ManifoldKernel, ManifoldSolid};
 use mold_shell::{
-    FlangeDivisionSettings, FlangeEdge, PartingRegions, PrintTile, PrintVolume, SegmentBoundary,
-    SegmentFlangeSettings, SegmentationSettings, ShellSettings, TiledSegmentationSettings,
-    WebbingSettings, alternating_rib_layouts, attach_structural_webbing, divide_flange,
+    BaseAttachmentGeometry, BaseMoldHalves, FlangeDivisionSettings, FlangeEdge, PartingRegions,
+    PrintTile, PrintVolume, SegmentBoundary, SegmentFlangeSettings, SegmentationSettings,
+    ShellSettings, TiledSegmentationSettings, WebbingSettings, alternating_rib_layouts,
+    attach_base_sealing_profile, attach_structural_webbing, divide_flange,
     generate_sectioned_shell_mold_with_parting_ranges, partition_tiles_for_print_volume,
     split_with_cumulative_cutters,
 };
 use mold_test_models::{
-    PrintableEnvelope, RibPathSpec, WingEdge, WingSpec, WingSurface, chord_region_extended,
-    printable_tile_dimensions, registration_diamond, sample_longitudinal_surface_path,
-    sample_rib_surface_path, sampled_chord_band_region, segment_normal, transverse_flange_blank,
+    PrintableEnvelope, RibPathSpec, WingBaseAttachmentSettings, WingEdge, WingSpec, WingSurface,
+    chord_region_extended, printable_tile_dimensions, registration_diamond,
+    sample_longitudinal_surface_path, sample_rib_surface_path, sampled_chord_band_region,
+    segment_normal, transverse_flange_blank, wing_base_attachment_geometry,
     wing_segment_boundaries,
 };
 
 const FLANGE_MARGIN: f64 = 12.0;
 const RIB_SAMPLES: usize = 24;
 const CANDIDATE_STEP: f64 = 25.0;
-const MODEL_SCALE: f64 = 1.2;
 const SHELL_THICKNESS: f64 = 3.0;
 
 #[derive(Debug, Clone, Copy)]
@@ -63,21 +67,78 @@ struct RegistrationInsert {
     solid: ManifoldSolid,
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let output = Path::new("target/sample-mold");
+struct SampleArtifacts<'a> {
+    output: &'a Path,
+    part: &'a ManifoldSolid,
+    mold: &'a SectionedTwoPartMold<ManifoldSolid>,
+    base_sealing_profile: &'a ManifoldSolid,
+    inserts: &'a [RegistrationInsert],
+    artifact_stem: &'a str,
+    assembly_title: &'a str,
+}
+
+pub struct WingMoldSample {
+    spec: WingSpec,
+    output: PathBuf,
+    artifact_stem: String,
+    assembly_title: String,
+    model_scale: f64,
+    profile_points: usize,
+}
+
+impl WingMoldSample {
+    pub fn new(
+        spec: WingSpec,
+        output: impl Into<PathBuf>,
+        artifact_stem: impl Into<String>,
+        assembly_title: impl Into<String>,
+    ) -> Self {
+        Self {
+            spec,
+            output: output.into(),
+            artifact_stem: artifact_stem.into(),
+            assembly_title: assembly_title.into(),
+            model_scale: 1.0,
+            profile_points: 24,
+        }
+    }
+
+    pub fn with_model_scale(mut self, model_scale: f64) -> Self {
+        self.model_scale = model_scale;
+        self
+    }
+
+    pub fn with_profile_points(mut self, profile_points: usize) -> Self {
+        self.profile_points = profile_points;
+        self
+    }
+
+    pub fn generate(self) -> Result<(), Box<dyn std::error::Error>> {
+        generate(self)
+    }
+}
+
+fn generate(sample: WingMoldSample) -> Result<(), Box<dyn std::error::Error>> {
+    if !sample.model_scale.is_finite() || sample.model_scale <= 0.0 {
+        return Err("sample model scale must be finite and positive".into());
+    }
+    let output = sample.output.as_path();
     fs::create_dir_all(output)?;
 
-    let mut spec = mold_test_models::preset("gull")?;
-    spec.profile_points = 24;
+    let mut spec = sample.spec;
+    spec.profile_points = sample.profile_points;
     for station in &mut spec.stations {
-        station.span *= MODEL_SCALE;
-        station.chord *= MODEL_SCALE;
-        station.x_offset *= MODEL_SCALE;
-        station.z_offset *= MODEL_SCALE;
+        station.span *= sample.model_scale;
+        station.chord *= sample.model_scale;
+        station.x_offset *= sample.model_scale;
+        station.z_offset *= sample.model_scale;
     }
     let kernel = ManifoldKernel;
     let part = ManifoldSolid(mold_test_models::generate(&spec)?);
-    mold_test_models::write_stl(&part.0, output.join("gull-wing.stl"))?;
+    mold_test_models::write_stl(
+        &part.0,
+        output.join(format!("{}.stl", sample.artifact_stem)),
+    )?;
 
     let lower_region = ManifoldSolid(chord_region_extended(
         &spec,
@@ -173,8 +234,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let registration = RegistrationSettings::default();
-    let inserts = build_registration_inserts(&spec, &ranges, registration)?;
+    let base_geometry = wing_base_attachment_geometry(
+        &spec,
+        expanded_bounds.min.y,
+        WingBaseAttachmentSettings {
+            flange_width: segment_flanges.width,
+            axial_thickness: segment_flanges.axial_thickness,
+            registration: Default::default(),
+        },
+    )?;
+    let base_opening = ManifoldSolid(base_geometry.opening);
+    let base_mold_flange = ManifoldSolid(base_geometry.mold_flange);
+    let base_sealing_profile_blank = ManifoldSolid(base_geometry.sealing_profile);
+    let mut inserts = build_registration_inserts(&spec, &ranges, registration)?;
+    let base_insert_start = inserts.len();
+    inserts.extend(base_geometry.registration.into_iter().map(|(edge, solid)| {
+        RegistrationInsert {
+            name: format!("registration-insert-base-{}", wing_edge_name(edge)),
+            solid: ManifoldSolid(solid),
+        }
+    }));
+    println!("placed {} registration inserts", inserts.len());
     let socket_cutters: Vec<&ManifoldSolid> = inserts.iter().map(|insert| &insert.solid).collect();
+    let base_socket_cutters: Vec<&ManifoldSolid> = inserts[base_insert_start..]
+        .iter()
+        .map(|insert| &insert.solid)
+        .collect();
     let (lower_ribs, upper_ribs) = build_ribs(&kernel, &spec, &ranges, registration, webbing)?;
 
     let mut baseline = generate_sectioned_shell_mold_with_parting_ranges(
@@ -193,6 +278,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Axis::Y,
         &ranges,
         shell_settings,
+    )?;
+    let base_sealing_profile = attach_base_sealing_profile(
+        &kernel,
+        BaseMoldHalves::first_in(&mut baseline).ok_or("mold has no root segments")?,
+        BaseAttachmentGeometry {
+            opening: &base_opening,
+            mold_flange: &base_mold_flange,
+            sealing_profile: &base_sealing_profile_blank,
+            negative_region: &lower_region,
+            positive_region: &upper_region,
+            sockets: &base_socket_cutters,
+        },
     )?;
     add_segment_join_flanges(
         &kernel,
@@ -234,7 +331,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let upper_webbing = additions(&kernel, &mold.positive, &baseline.positive)?;
     validate_attached("lower", &mold.negative, &baseline.negative, &lower_webbing)?;
     validate_attached("upper", &mold.positive, &baseline.positive, &upper_webbing)?;
-    export_artifacts(&kernel, output, &part, &mold, &inserts)?;
+    export_artifacts(
+        &kernel,
+        SampleArtifacts {
+            output,
+            part: &part,
+            mold: &mold,
+            base_sealing_profile: &base_sealing_profile,
+            inserts: &inserts,
+            artifact_stem: &sample.artifact_stem,
+            assembly_title: &sample.assembly_title,
+        },
+    )?;
     Ok(())
 }
 
@@ -486,7 +594,6 @@ fn build_registration_inserts(
             }
         }
     }
-    println!("placed {} registration inserts", inserts.len());
     Ok(inserts)
 }
 
@@ -582,11 +689,17 @@ fn validate_attached(
 
 fn export_artifacts(
     kernel: &ManifoldKernel,
-    output: &Path,
-    part: &ManifoldSolid,
-    mold: &SectionedTwoPartMold<ManifoldSolid>,
-    inserts: &[RegistrationInsert],
+    artifacts: SampleArtifacts<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let SampleArtifacts {
+        output,
+        part,
+        mold,
+        base_sealing_profile,
+        inserts,
+        artifact_stem,
+        assembly_title,
+    } = artifacts;
     for (prefix, pieces) in [("lower", &mold.negative), ("upper", &mold.positive)] {
         for (index, piece) in pieces.iter().enumerate() {
             kernel.export_stl(
@@ -595,13 +708,23 @@ fn export_artifacts(
             )?;
         }
     }
+    kernel.export_stl(
+        base_sealing_profile,
+        output.join("base-sealing-profile.stl"),
+    )?;
     for insert in inserts {
         kernel.export_stl(&insert.solid, output.join(format!("{}.stl", insert.name)))?;
     }
-    let mut assembly = vec![ThreeMfObject {
-        name: "wing".to_owned(),
-        solid: part,
-    }];
+    let mut assembly = vec![
+        ThreeMfObject {
+            name: "wing".to_owned(),
+            solid: part,
+        },
+        ThreeMfObject {
+            name: "base-sealing-profile".to_owned(),
+            solid: base_sealing_profile,
+        },
+    ];
     for (prefix, pieces) in [("lower", &mold.negative), ("upper", &mold.positive)] {
         for (index, piece) in pieces.iter().enumerate() {
             assembly.push(ThreeMfObject {
@@ -617,8 +740,8 @@ fn export_artifacts(
         });
     }
     write_3mf(
-        output.join("gull-wing-mold-assembly.3mf"),
-        "Gull wing mold validation assembly",
+        output.join(format!("{artifact_stem}-mold-assembly.3mf")),
+        assembly_title,
         &assembly,
     )?;
     println!("generated visual sample in {}", output.display());
@@ -636,5 +759,12 @@ const fn edge_name(edge: FlangeEdge) -> &'static str {
     match edge {
         FlangeEdge::Leading => "leading",
         FlangeEdge::Trailing => "trailing",
+    }
+}
+
+const fn wing_edge_name(edge: WingEdge) -> &'static str {
+    match edge {
+        WingEdge::Leading => "leading",
+        WingEdge::Trailing => "trailing",
     }
 }

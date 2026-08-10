@@ -9,6 +9,8 @@ A generic mold generator for STL/STEP-derived geometry, with a Rust core that is
 - `mold-core` contains mold-generation logic and depends only on `mold-geometry`.
 - `mold-cli` is the command-line frontend.
 - `mold-test-models` generates deterministic wing fixtures independently of `mold-core`.
+- `mold-samples` owns the reusable wing-mold sample workflow; individual examples only select a
+  wing specification and artifact metadata.
 - CAD integrations such as Autodesk Fusion should remain thin adapters around the core.
 
 ## File formats
@@ -31,6 +33,14 @@ cargo run -p mold-test-models -- gull gull-wing.stl
 ```
 
 The library API also exposes `WingSpec`, `WingStation`, and `Naca4`, allowing tests to construct custom deterministic fixtures programmatically. The fixture generator intentionally does not depend on `mold-core`, so mold-generation tests do not generate their input geometry with the algorithms under test.
+
+The gull and straight tapered samples exercise the same mold-generation workflow without
+duplicating segmentation, flange, registration, webbing, tiling, validation, or export logic:
+
+```sh
+cargo run -p mold-samples --example gull_sample
+cargo run -p mold-samples --example straight_sample
+```
 
 ## Current vertical slice
 

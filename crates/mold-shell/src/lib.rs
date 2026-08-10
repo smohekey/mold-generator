@@ -523,6 +523,60 @@ where
     Ok(())
 }
 
+/// The two root pieces that receive a shared base flange.
+pub struct BaseMoldHalves<'a, S> {
+    pub negative: &'a mut S,
+    pub positive: &'a mut S,
+}
+
+impl<'a, S> BaseMoldHalves<'a, S> {
+    pub fn first_in(mold: &'a mut SectionedTwoPartMold<S>) -> Option<Self> {
+        Some(Self {
+            negative: mold.negative.first_mut()?,
+            positive: mold.positive.first_mut()?,
+        })
+    }
+}
+
+/// Backend-provided solids used to open a mold root and attach a separate
+/// sealing profile. The flange is split with the same regions as the mold
+/// halves, and every socket is cut after the new material is attached.
+pub struct BaseAttachmentGeometry<'a, S> {
+    pub opening: &'a S,
+    pub mold_flange: &'a S,
+    pub sealing_profile: &'a S,
+    pub negative_region: &'a S,
+    pub positive_region: &'a S,
+    pub sockets: &'a [&'a S],
+}
+
+pub fn attach_base_sealing_profile<K>(
+    kernel: &K,
+    halves: BaseMoldHalves<'_, K::Solid>,
+    geometry: BaseAttachmentGeometry<'_, K::Solid>,
+) -> Result<K::Solid, K::Error>
+where
+    K: SolidKernel,
+{
+    for (root, region) in [
+        (halves.negative, geometry.negative_region),
+        (halves.positive, geometry.positive_region),
+    ] {
+        *root = kernel.difference(root, geometry.opening)?;
+        let half_flange = kernel.intersection(geometry.mold_flange, region)?;
+        *root = kernel.union_attached(root, &half_flange)?;
+        for socket in geometry.sockets {
+            *root = kernel.difference(root, socket)?;
+        }
+    }
+
+    let mut sealing_profile = geometry.sealing_profile.clone();
+    for socket in geometry.sockets {
+        sealing_profile = kernel.difference(&sealing_profile, socket)?;
+    }
+    Ok(sealing_profile)
+}
+
 /// Splits one solid with ordered cumulative cutters. Every returned neighbor
 /// is derived from the same remainder, making the shared Boolean boundary
 /// authoritative instead of independently intersecting adjacent regions.
@@ -1238,6 +1292,55 @@ mod tests {
         assert!(solid.0.difference(&rejoined.0).volume() < 1.0e-9);
         assert!(rejoined.0.difference(&solid.0).volume() < 1.0e-9);
         assert!(pieces[0].0.intersection(&pieces[1].0).volume() < 1.0e-9);
+    }
+
+    #[test]
+    fn base_attachment_opens_root_adds_flange_and_cuts_mating_sockets() {
+        let kernel = ManifoldKernel;
+        let cuboid = |min: (f64, f64, f64), max: (f64, f64, f64)| {
+            kernel
+                .cuboid(Bounds3 {
+                    min: Vec3::new(min.0, min.1, min.2),
+                    max: Vec3::new(max.0, max.1, max.2),
+                })
+                .unwrap()
+        };
+        let mut negative = cuboid((2.0, 0.0, 0.0), (8.0, 10.0, 5.0));
+        let mut positive = cuboid((2.0, 0.0, 5.0), (8.0, 10.0, 10.0));
+        let opening = cuboid((3.0, 0.0, 0.0), (7.0, 3.0, 10.0));
+        let flange_outer = cuboid((0.0, 0.0, 0.0), (10.0, 3.0, 10.0));
+        let mold_flange = kernel.difference(&flange_outer, &opening).unwrap();
+        let sealing_profile = cuboid((0.0, -3.0, 0.0), (10.0, 0.0, 10.0));
+        let negative_region = cuboid((-1.0, -4.0, -1.0), (11.0, 11.0, 5.0));
+        let positive_region = cuboid((-1.0, -4.0, 5.0), (11.0, 11.0, 11.0));
+        let socket = cuboid((0.5, -1.0, 4.0), (1.5, 1.0, 6.0));
+        let sockets = [&socket];
+
+        let seal = attach_base_sealing_profile(
+            &kernel,
+            BaseMoldHalves {
+                negative: &mut negative,
+                positive: &mut positive,
+            },
+            BaseAttachmentGeometry {
+                opening: &opening,
+                mold_flange: &mold_flange,
+                sealing_profile: &sealing_profile,
+                negative_region: &negative_region,
+                positive_region: &positive_region,
+                sockets: &sockets,
+            },
+        )
+        .unwrap();
+
+        for root in [&negative, &positive] {
+            assert!(root.0.intersection(&opening.0).volume() < 1.0e-9);
+            assert!(root.0.intersection(&socket.0).volume() < 1.0e-9);
+            let bounds = kernel.bounds(root).unwrap();
+            assert_eq!((bounds.min.x, bounds.max.x), (0.0, 10.0));
+        }
+        assert!(seal.0.intersection(&socket.0).volume() < 1.0e-9);
+        assert_eq!(kernel.bounds(&seal).unwrap().max.y, 0.0);
     }
 
     #[test]
