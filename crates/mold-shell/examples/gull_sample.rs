@@ -3,9 +3,7 @@ use std::{fs, num::NonZeroUsize, path::Path};
 use manifold_rust::{manifold::Manifold, types::MeshGL64};
 use mold_core::Axis;
 use mold_manifold::{ManifoldKernel, ManifoldSolid};
-use mold_shell::{
-    PartingRegions, ShellSettings, generate_sectioned_shell_mold_with_parting,
-};
+use mold_shell::{PartingRegions, ShellSettings, generate_sectioned_shell_mold_with_parting};
 use mold_test_models::{WingSpec, WingStation};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
