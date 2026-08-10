@@ -2,7 +2,7 @@ use std::{fs, path::Path};
 
 use mold_3mf::{ThreeMfObject, write_3mf};
 use mold_core::{Axis, SectionedTwoPartMold};
-use mold_geometry::{Bounds3, SolidKernel, Vec3};
+use mold_geometry::SolidKernel;
 use mold_manifold::{ManifoldKernel, ManifoldSolid};
 use mold_shell::{
     FlangeDivisionSettings, FlangeEdge, PartingRegions, PrintTile, PrintVolume, SegmentBoundary,
@@ -13,14 +13,16 @@ use mold_shell::{
 };
 use mold_test_models::{
     PrintableEnvelope, RibPathSpec, WingEdge, WingSpec, WingSurface, chord_band_region,
-    chord_region, printable_tile_dimensions, registration_diamond, sample_rib_surface_path,
-    segment_normal, transverse_flange_blank, wing_segment_boundaries,
+    chord_region_extended, printable_tile_dimensions, registration_diamond,
+    sample_longitudinal_surface_path, sample_rib_surface_path, segment_normal,
+    transverse_flange_blank, wing_segment_boundaries,
 };
 
 const FLANGE_MARGIN: f64 = 12.0;
 const RIB_SAMPLES: usize = 24;
 const CANDIDATE_STEP: f64 = 25.0;
 const MODEL_SCALE: f64 = 1.2;
+const SHELL_THICKNESS: f64 = 3.0;
 
 #[derive(Debug, Clone, Copy)]
 struct FixtureSettings {
@@ -77,12 +79,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let part = ManifoldSolid(mold_test_models::generate(&spec)?);
     mold_test_models::write_stl(&part.0, output.join("gull-wing.stl"))?;
 
-    let lower_region = ManifoldSolid(chord_region(&spec, -500.0, 0.0, 80.0)?);
-    let upper_region = ManifoldSolid(chord_region(&spec, 0.0, 500.0, 80.0)?);
-    let lower_flange = ManifoldSolid(chord_region(&spec, -3.0, 0.0, FLANGE_MARGIN)?);
-    let upper_flange = ManifoldSolid(chord_region(&spec, 0.0, 3.0, FLANGE_MARGIN)?);
+    let lower_region = ManifoldSolid(chord_region_extended(
+        &spec,
+        -500.0,
+        0.0,
+        80.0,
+        SHELL_THICKNESS,
+    )?);
+    let upper_region = ManifoldSolid(chord_region_extended(
+        &spec,
+        0.0,
+        500.0,
+        80.0,
+        SHELL_THICKNESS,
+    )?);
+    let lower_flange = ManifoldSolid(chord_region_extended(
+        &spec,
+        -3.0,
+        0.0,
+        FLANGE_MARGIN,
+        SHELL_THICKNESS,
+    )?);
+    let upper_flange = ManifoldSolid(chord_region_extended(
+        &spec,
+        0.0,
+        3.0,
+        FLANGE_MARGIN,
+        SHELL_THICKNESS,
+    )?);
 
     let shell_settings = ShellSettings {
+        thickness: SHELL_THICKNESS,
         structural_webbing: None,
         ..Default::default()
     };
@@ -199,12 +226,57 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let baseline = split_mold_into_tiles(&kernel, &spec, baseline, &ranges, &tiles)?;
     let mold = split_mold_into_tiles(&kernel, &spec, mold, &ranges, &tiles)?;
+    validate_no_part_intrusion(&part, &mold)?;
+    validate_root_offset(&kernel, &part, &mold, shell_settings.thickness)?;
 
     let lower_webbing = additions(&kernel, &mold.negative, &baseline.negative)?;
     let upper_webbing = additions(&kernel, &mold.positive, &baseline.positive)?;
     validate_attached("lower", &mold.negative, &baseline.negative, &lower_webbing)?;
     validate_attached("upper", &mold.positive, &baseline.positive, &upper_webbing)?;
     export_artifacts(&kernel, output, &part, &mold, &inserts)?;
+    Ok(())
+}
+
+fn validate_root_offset(
+    kernel: &ManifoldKernel,
+    part: &ManifoldSolid,
+    mold: &SectionedTwoPartMold<ManifoldSolid>,
+    expected_offset: f64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let wing_root = kernel.bounds(part)?.min.y;
+    let mold_root = mold
+        .negative
+        .iter()
+        .chain(&mold.positive)
+        .map(|piece| kernel.bounds(piece).map(|bounds| bounds.min.y))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .fold(f64::INFINITY, f64::min);
+    if mold_root > wing_root - expected_offset * 0.9 {
+        return Err(format!(
+            "root mold face is not offset from wing: wing={wing_root:.6}, mold={mold_root:.6}"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn validate_no_part_intrusion(
+    part: &ManifoldSolid,
+    mold: &SectionedTwoPartMold<ManifoldSolid>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for (half, pieces) in [("lower", &mold.negative), ("upper", &mold.positive)] {
+        for (index, piece) in pieces.iter().enumerate() {
+            let intrusion = piece.0.intersection(&part.0).volume();
+            if intrusion > 1.0e-6 {
+                return Err(format!(
+                    "{half} tile {} intrudes into the wing by {intrusion:.9}",
+                    index + 1
+                )
+                .into());
+            }
+        }
+    }
     Ok(())
 }
 
@@ -273,28 +345,31 @@ fn add_segment_join_flanges(
         }
         for pair in section_tiles.windows(2) {
             let chord_fraction = pair[0].chord.1;
-            let center = mold_test_models::interpolate_station(
-                spec,
-                ((range.0 + range.1) * 0.5).clamp(model_start, model_end),
-            )?;
-            let half_fraction = settings.width / center.chord * 0.5;
-            let blank = ManifoldSolid(chord_band_region(
-                spec,
-                (
-                    (chord_fraction - half_fraction).max(0.0),
-                    (chord_fraction + half_fraction).min(1.0),
-                ),
-                -settings.axial_thickness * 0.5,
-                settings.axial_thickness * 0.5,
-                settings.width,
-            )?);
-            let clip = kernel.cuboid(Bounds3 {
-                min: Vec3::new(-10_000.0, range.0, -10_000.0),
-                max: Vec3::new(10_000.0, range.1, 10_000.0),
-            })?;
-            let blank = kernel.intersection(&blank, &clip)?;
-            attach(&mut mold.negative[section], blank.clone(), lower_region)?;
-            attach(&mut mold.positive[section], blank, upper_region)?;
+            let start = range.0.max(model_start);
+            let end = range.1.min(model_end);
+            let upper_direction = segment_normal(spec, start, end)?;
+            let lower_direction = upper_direction.map(|value| -value);
+            let make_flange = |surface,
+                               direction|
+             -> Result<ManifoldSolid, Box<dyn std::error::Error>> {
+                let path = sample_longitudinal_surface_path(
+                    spec,
+                    chord_fraction,
+                    start,
+                    end,
+                    RIB_SAMPLES,
+                    surface,
+                )?;
+                let path: Vec<[f64; 3]> = path
+                    .into_iter()
+                    .map(|point| add_scaled(point, direction, shell_thickness * 0.8))
+                    .collect();
+                Ok(kernel.swept_rib(&path, direction, settings.width, settings.axial_thickness)?)
+            };
+            let lower = make_flange(WingSurface::Lower, lower_direction)?;
+            let upper = make_flange(WingSurface::Upper, upper_direction)?;
+            mold.negative[section] = kernel.union_attached(&mold.negative[section], &lower)?;
+            mold.positive[section] = kernel.union_attached(&mold.positive[section], &upper)?;
         }
     }
     for piece in mold.negative.iter_mut().chain(&mut mold.positive) {
@@ -303,6 +378,14 @@ fn add_segment_join_flanges(
         }
     }
     Ok(())
+}
+
+fn add_scaled(point: [f64; 3], direction: [f64; 3], distance: f64) -> [f64; 3] {
+    [
+        point[0] + direction[0] * distance,
+        point[1] + direction[1] * distance,
+        point[2] + direction[2] * distance,
+    ]
 }
 
 fn split_mold_into_tiles(

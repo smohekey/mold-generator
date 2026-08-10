@@ -389,6 +389,28 @@ pub fn sample_rib_surface_path(
         .collect()
 }
 
+pub fn sample_longitudinal_surface_path(
+    spec: &WingSpec,
+    chord_fraction: f64,
+    start_span: f64,
+    end_span: f64,
+    samples: usize,
+    surface: WingSurface,
+) -> Result<Vec<[f64; 3]>, WingError> {
+    if !(0.0..=1.0).contains(&chord_fraction) || samples == 0 || end_span <= start_span {
+        return Err(WingError::InvalidSpec(
+            "longitudinal path needs a chord fraction, samples, and positive span",
+        ));
+    }
+    (0..=samples)
+        .map(|index| {
+            let span = lerp(start_span, end_span, index as f64 / samples as f64);
+            let station = interpolate_station(spec, span)?;
+            surface_point(spec, &station, station.chord * chord_fraction, surface)
+        })
+        .collect()
+}
+
 pub fn interpolate_station(spec: &WingSpec, span: f64) -> Result<WingStation, WingError> {
     for pair in spec.stations.windows(2) {
         let a = pair[0];
@@ -426,11 +448,46 @@ pub fn chord_region(
     z_max: f64,
     chord_margin: f64,
 ) -> Result<Manifold, WingError> {
+    chord_region_extended(spec, z_min, z_max, chord_margin, 0.0)
+}
+
+pub fn chord_region_extended(
+    spec: &WingSpec,
+    z_min: f64,
+    z_max: f64,
+    chord_margin: f64,
+    span_margin: f64,
+) -> Result<Manifold, WingError> {
+    if span_margin < 0.0 {
+        return Err(WingError::InvalidSpec("span margin cannot be negative"));
+    }
+    let first = *spec
+        .stations
+        .first()
+        .ok_or(WingError::InvalidSpec("wing has no stations"))?;
+    let last = *spec
+        .stations
+        .last()
+        .ok_or(WingError::InvalidSpec("wing has no stations"))?;
+    let mut stations = Vec::with_capacity(spec.stations.len() + 2);
+    if span_margin > 0.0 {
+        stations.push(WingStation {
+            span: first.span - span_margin,
+            ..first
+        });
+    }
+    stations.extend(spec.stations.iter().copied());
+    if span_margin > 0.0 {
+        stations.push(WingStation {
+            span: last.span + span_margin,
+            ..last
+        });
+    }
     let mut mesh = MeshGL64 {
         num_prop: 3,
         ..Default::default()
     };
-    for station in &spec.stations {
+    for station in &stations {
         for &(x, z) in &[
             (-chord_margin, z_min),
             (station.chord + chord_margin, z_min),
@@ -441,7 +498,7 @@ pub fn chord_region(
                 .extend(transform_station(station, x, z));
         }
     }
-    close_quad_loft(&mut mesh, spec.stations.len());
+    close_quad_loft(&mut mesh, stations.len());
     checked_mesh(mesh, "chord region")
 }
 
@@ -1132,6 +1189,21 @@ mod tests {
     }
 
     #[test]
+    fn longitudinal_flange_paths_follow_the_upper_and_lower_surfaces() {
+        let spec = preset("gull").unwrap();
+        let lower =
+            sample_longitudinal_surface_path(&spec, 0.5, 0.0, 180.0, 12, WingSurface::Lower)
+                .unwrap();
+        let upper =
+            sample_longitudinal_surface_path(&spec, 0.5, 0.0, 180.0, 12, WingSurface::Upper)
+                .unwrap();
+
+        assert_eq!(lower.len(), 13);
+        assert_eq!(upper.len(), 13);
+        assert!(upper[6][2] > lower[6][2]);
+    }
+
+    #[test]
     fn gull_chord_regions_are_closed_manifolds() {
         let spec = preset("gull").unwrap();
 
@@ -1144,6 +1216,14 @@ mod tests {
             assert!(!region.is_empty());
             assert!(region.volume() > 0.0);
         }
+    }
+
+    #[test]
+    fn extended_chord_region_preserves_shell_offset_beyond_wing_root() {
+        let spec = preset("gull").unwrap();
+        let region = chord_region_extended(&spec, -500.0, 0.0, 80.0, 3.0).unwrap();
+
+        assert!((region.bounding_box().min.y + 3.0).abs() < 1.0e-9);
     }
 
     #[test]
