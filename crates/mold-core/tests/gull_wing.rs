@@ -6,7 +6,7 @@ use mold_core::{
 };
 use mold_geometry::{SolidKernel, Vec3};
 use mold_manifold::{ManifoldKernel, ManifoldSolid};
-use mold_test_models::{generate, preset};
+use mold_wing_geometry::{generate, preset};
 
 #[test]
 fn gull_wing_generates_valid_sectioned_two_part_mold() {

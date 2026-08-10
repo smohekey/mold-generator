@@ -1,8 +1,8 @@
-use mold_samples::WingMoldSample;
+use mold_wing::{WingMoldGenerator, preset};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    WingMoldSample::new(
-        mold_test_models::preset("gull")?,
+    WingMoldGenerator::new(
+        preset("gull")?,
         "target/sample-mold",
         "gull-wing",
         "Gull wing mold validation assembly",

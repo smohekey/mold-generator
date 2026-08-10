@@ -4,13 +4,13 @@ use manifold_rust::{manifold::Manifold, types::MeshGL64};
 use mold_core::Axis;
 use mold_manifold::{ManifoldKernel, ManifoldSolid};
 use mold_shell::{PartingRegions, ShellSettings, generate_sectioned_shell_mold_with_parting};
-use mold_test_models::{WingSpec, WingStation};
+use mold_wing_geometry::{WingSpec, WingStation};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut spec = mold_test_models::preset("gull")?;
+    let mut spec = mold_wing_geometry::preset("gull")?;
     spec.profile_points = 24;
 
-    let part = ManifoldSolid(mold_test_models::generate(&spec)?);
+    let part = ManifoldSolid(mold_wing_geometry::generate(&spec)?);
     let lower_region = ManifoldSolid(chord_region(&spec, -500.0, 0.0, 80.0)?);
     let upper_region = ManifoldSolid(chord_region(&spec, 0.0, 500.0, 80.0)?);
     let lower_flange = ManifoldSolid(chord_region(&spec, -3.0, 0.0, 12.0)?);

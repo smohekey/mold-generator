@@ -1,8 +1,8 @@
-use mold_samples::WingMoldSample;
+use mold_wing::{WingMoldGenerator, preset};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    WingMoldSample::new(
-        mold_test_models::preset("tapered")?,
+    WingMoldGenerator::new(
+        preset("tapered")?,
         "target/sample-mold/straight",
         "straight-wing",
         "Straight tapered wing mold validation assembly",

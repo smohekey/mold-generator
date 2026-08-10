@@ -23,6 +23,20 @@ pub struct SegmentFlangeSettings {
 }
 
 impl SegmentFlangeSettings {
+    const LONGITUDINAL_SHELL_OFFSET_RATIO: f64 = 0.8;
+
+    /// Places the inner face of a longitudinal flange inside the shell so its
+    /// union retains a reliable overlap with the shell wall.
+    pub fn longitudinal_attachment_offset(shell_thickness: f64) -> f64 {
+        shell_thickness * Self::LONGITUDINAL_SHELL_OFFSET_RATIO
+    }
+
+    /// Returns the part-relative margin that gives a lateral flange the same
+    /// outer height as a longitudinal flange.
+    pub fn lateral_flange_margin(self, shell_thickness: f64) -> f64 {
+        Self::longitudinal_attachment_offset(shell_thickness) + self.width
+    }
+
     pub fn top_ramp_length(self) -> f64 {
         self.width / self.maximum_overhang_angle_deg.to_radians().tan()
     }
@@ -1357,6 +1371,20 @@ mod tests {
             ..settings
         };
         assert!(shallower.top_ramp_length() > settings.top_ramp_length());
+    }
+
+    #[test]
+    fn lateral_flange_margin_matches_the_longitudinal_outer_height() {
+        let settings = SegmentFlangeSettings::default();
+        let shell_thickness = 3.0;
+        let attachment = SegmentFlangeSettings::longitudinal_attachment_offset(shell_thickness);
+
+        assert!((attachment - 2.4).abs() < 1.0e-9);
+        assert!((settings.lateral_flange_margin(shell_thickness) - 14.4).abs() < 1.0e-9);
+        assert!(
+            (settings.lateral_flange_margin(shell_thickness) - (attachment + settings.width)).abs()
+                < 1.0e-9
+        );
     }
 
     #[test]

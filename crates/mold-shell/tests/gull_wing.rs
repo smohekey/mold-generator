@@ -7,7 +7,7 @@ use mold_shell::{
     PrintVolume, SegmentBoundary, SegmentationSettings, ShellSettings, TiledSegmentationSettings,
     generate_sectioned_shell_mold, partition_for_print_volume, partition_tiles_for_print_volume,
 };
-use mold_test_models::{
+use mold_wing_geometry::{
     PrintableEnvelope, generate, preset, printable_segment_dimensions, printable_tile_dimensions,
     wing_segment_boundaries,
 };

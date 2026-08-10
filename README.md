@@ -7,10 +7,10 @@ A generic mold generator for STL/STEP-derived geometry, with a Rust core that is
 - `mold-geometry` defines backend-neutral geometry and the `SolidKernel` abstraction used by mold algorithms.
 - `mold-manifold` is the first concrete backend, using the pure-Rust `manifold-rust` crate for triangle-mesh CSG and STL conversion.
 - `mold-core` contains mold-generation logic and depends only on `mold-geometry`.
+- `mold-wing-geometry` defines deterministic wing specifications and geometry independently of mold-generation policy.
+- `mold-wing` contains the reusable wing-mold generation workflow.
 - `mold-cli` is the command-line frontend.
-- `mold-test-models` generates deterministic wing fixtures independently of `mold-core`.
-- `mold-samples` owns the reusable wing-mold sample workflow; individual examples only select a
-  wing specification and artifact metadata.
+- `mold-samples` contains configuration-only example binaries.
 - CAD integrations such as Autodesk Fusion should remain thin adapters around the core.
 
 ## File formats
@@ -22,20 +22,19 @@ The initial implementation targets STL import and export. STEP is a future requi
 
 This separation allows the mold-generation algorithms to remain unchanged as richer CAD formats are added.
 
-## Wing test models
+## Wing geometry and molds
 
-`mold-test-models` generates deterministic closed wing solids from NACA 4-digit airfoils. Coordinates use X for chord, Y for span, and Z for vertical displacement. The generator lofts explicit spanwise stations, so sweep, taper, dihedral, twist, and non-linear gull-wing geometry can be exercised without relying on external STL fixtures.
+`mold-wing-geometry` generates deterministic closed wing solids from NACA 4-digit airfoils. Coordinates use X for chord, Y for span, and Z for vertical displacement. The generator lofts explicit spanwise stations, so sweep, taper, dihedral, twist, and non-linear gull-wing geometry can be exercised without relying on external STL fixtures.
 
 Available presets are `rectangular`, `tapered`, `swept`, `dihedral`, `twisted`, and `gull`:
 
 ```sh
-cargo run -p mold-test-models -- gull gull-wing.stl
+cargo run -p mold-wing-geometry -- gull gull-wing.stl
 ```
 
-The library API also exposes `WingSpec`, `WingStation`, and `Naca4`, allowing tests to construct custom deterministic fixtures programmatically. The fixture generator intentionally does not depend on `mold-core`, so mold-generation tests do not generate their input geometry with the algorithms under test.
+The geometry API exposes `WingSpec`, `WingStation`, and `Naca4`, allowing consumers and tests to construct custom deterministic wings programmatically. It intentionally does not depend on `mold-core`, so mold-generation tests do not generate their input geometry with the algorithms under test.
 
-The gull and straight tapered samples exercise the same mold-generation workflow without
-duplicating segmentation, flange, registration, webbing, tiling, validation, or export logic:
+`mold-wing` owns the segmentation, flange, registration, webbing, tiling, validation, and export workflow. The gull and straight tapered samples contain only the wing preset and artifact configuration:
 
 ```sh
 cargo run -p mold-samples --example gull_sample

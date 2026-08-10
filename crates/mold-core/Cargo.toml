@@ -10,4 +10,4 @@ mold-geometry.workspace = true
 
 [dev-dependencies]
 mold-manifold.workspace = true
-mold-test-models = { path = "../mold-test-models" }
+mold-wing-geometry.workspace = true

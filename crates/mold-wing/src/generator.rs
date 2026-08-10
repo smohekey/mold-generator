@@ -15,7 +15,7 @@ use mold_shell::{
     generate_sectioned_shell_mold_with_parting_ranges, partition_tiles_for_print_volume,
     split_with_cumulative_cutters,
 };
-use mold_test_models::{
+use mold_wing_geometry::{
     PrintableEnvelope, RibPathSpec, WingBaseAttachmentSettings, WingEdge, WingSpec, WingSurface,
     chord_region_extended, printable_tile_dimensions, registration_diamond,
     sample_longitudinal_surface_path, sample_rib_surface_path, sampled_chord_band_region,
@@ -67,7 +67,7 @@ struct RegistrationInsert {
     solid: ManifoldSolid,
 }
 
-struct SampleArtifacts<'a> {
+struct MoldArtifacts<'a> {
     output: &'a Path,
     part: &'a ManifoldSolid,
     mold: &'a SectionedTwoPartMold<ManifoldSolid>,
@@ -77,7 +77,7 @@ struct SampleArtifacts<'a> {
     assembly_title: &'a str,
 }
 
-pub struct WingMoldSample {
+pub struct WingMoldGenerator {
     spec: WingSpec,
     output: PathBuf,
     artifact_stem: String,
@@ -86,7 +86,7 @@ pub struct WingMoldSample {
     profile_points: usize,
 }
 
-impl WingMoldSample {
+impl WingMoldGenerator {
     pub fn new(
         spec: WingSpec,
         output: impl Into<PathBuf>,
@@ -118,26 +118,26 @@ impl WingMoldSample {
     }
 }
 
-fn generate(sample: WingMoldSample) -> Result<(), Box<dyn std::error::Error>> {
-    if !sample.model_scale.is_finite() || sample.model_scale <= 0.0 {
-        return Err("sample model scale must be finite and positive".into());
+fn generate(generator: WingMoldGenerator) -> Result<(), Box<dyn std::error::Error>> {
+    if !generator.model_scale.is_finite() || generator.model_scale <= 0.0 {
+        return Err("model scale must be finite and positive".into());
     }
-    let output = sample.output.as_path();
+    let output = generator.output.as_path();
     fs::create_dir_all(output)?;
 
-    let mut spec = sample.spec;
-    spec.profile_points = sample.profile_points;
+    let mut spec = generator.spec;
+    spec.profile_points = generator.profile_points;
     for station in &mut spec.stations {
-        station.span *= sample.model_scale;
-        station.chord *= sample.model_scale;
-        station.x_offset *= sample.model_scale;
-        station.z_offset *= sample.model_scale;
+        station.span *= generator.model_scale;
+        station.chord *= generator.model_scale;
+        station.x_offset *= generator.model_scale;
+        station.z_offset *= generator.model_scale;
     }
     let kernel = ManifoldKernel;
-    let part = ManifoldSolid(mold_test_models::generate(&spec)?);
-    mold_test_models::write_stl(
+    let part = ManifoldSolid(mold_wing_geometry::generate(&spec)?);
+    mold_wing_geometry::write_stl(
         &part.0,
-        output.join(format!("{}.stl", sample.artifact_stem)),
+        output.join(format!("{}.stl", generator.artifact_stem)),
     )?;
 
     let lower_region = ManifoldSolid(chord_region_extended(
@@ -238,7 +238,7 @@ fn generate(sample: WingMoldSample) -> Result<(), Box<dyn std::error::Error>> {
         &spec,
         expanded_bounds.min.y,
         WingBaseAttachmentSettings {
-            flange_width: segment_flanges.width,
+            flange_width: segment_flanges.lateral_flange_margin(shell_settings.thickness),
             axial_thickness: segment_flanges.axial_thickness,
             registration: Default::default(),
         },
@@ -333,14 +333,14 @@ fn generate(sample: WingMoldSample) -> Result<(), Box<dyn std::error::Error>> {
     validate_attached("upper", &mold.positive, &baseline.positive, &upper_webbing)?;
     export_artifacts(
         &kernel,
-        SampleArtifacts {
+        MoldArtifacts {
             output,
             part: &part,
             mold: &mold,
             base_sealing_profile: &base_sealing_profile,
             inserts: &inserts,
-            artifact_stem: &sample.artifact_stem,
-            assembly_title: &sample.assembly_title,
+            artifact_stem: &generator.artifact_stem,
+            assembly_title: &generator.assembly_title,
         },
     )?;
     Ok(())
@@ -403,7 +403,9 @@ fn add_segment_join_flanges(
     shell_thickness: f64,
     exclusions: &[&ManifoldSolid],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if !settings.width.is_finite()
+    if !shell_thickness.is_finite()
+        || shell_thickness <= 0.0
+        || !settings.width.is_finite()
         || settings.width <= shell_thickness
         || settings.axial_thickness <= 0.0
         || !(0.0..90.0).contains(&settings.maximum_overhang_angle_deg)
@@ -412,6 +414,9 @@ fn add_segment_join_flanges(
     }
     let model_start = spec.stations.first().ok_or("wing has no stations")?.span;
     let model_end = spec.stations.last().ok_or("wing has no stations")?.span;
+    let longitudinal_attachment_offset =
+        SegmentFlangeSettings::longitudinal_attachment_offset(shell_thickness);
+    let lateral_flange_margin = settings.lateral_flange_margin(shell_thickness);
 
     let attach = |piece: &mut ManifoldSolid,
                   blank: ManifoldSolid,
@@ -428,13 +433,16 @@ fn add_segment_join_flanges(
         let ramp = settings.top_ramp_length();
         let top_blank = ManifoldSolid(transverse_flange_blank(
             spec,
-            &[(span - ramp, shell_thickness), (span, settings.width)],
+            &[
+                (span - ramp, shell_thickness),
+                (span, lateral_flange_margin),
+            ],
         )?);
         let bed_blank = ManifoldSolid(transverse_flange_blank(
             spec,
             &[
-                (span, settings.width),
-                (span + settings.axial_thickness, settings.width),
+                (span, lateral_flange_margin),
+                (span + settings.axial_thickness, lateral_flange_margin),
             ],
         )?);
         for (pieces, region) in [
@@ -479,7 +487,7 @@ fn add_segment_join_flanges(
                     };
                     let path: Vec<[f64; 3]> = path
                         .into_iter()
-                        .map(|point| add_scaled(point, direction, shell_thickness * 0.8))
+                        .map(|point| add_scaled(point, direction, longitudinal_attachment_offset))
                         .collect();
                     Ok(kernel.swept_rib_with_end_planes(
                         &path,
@@ -705,9 +713,9 @@ fn validate_attached(
 
 fn export_artifacts(
     kernel: &ManifoldKernel,
-    artifacts: SampleArtifacts<'_>,
+    artifacts: MoldArtifacts<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let SampleArtifacts {
+    let MoldArtifacts {
         output,
         part,
         mold,
@@ -760,7 +768,7 @@ fn export_artifacts(
         assembly_title,
         &assembly,
     )?;
-    println!("generated visual sample in {}", output.display());
+    println!("generated wing mold in {}", output.display());
     Ok(())
 }
 

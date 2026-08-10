@@ -1,6 +1,6 @@
 use std::{env, error::Error, io, process::ExitCode};
 
-use mold_test_models::{generate, preset, write_stl};
+use mold_wing_geometry::{generate, preset, write_stl};
 
 fn main() -> ExitCode {
     match run() {
@@ -34,7 +34,7 @@ fn invalid_input(message: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
         format!(
-            "{message}\nusage: mold-test-models <preset> <output.stl>\n\n\
+            "{message}\nusage: mold-wing-geometry <preset> <output.stl>\n\n\
              presets: rectangular, tapered, swept, dihedral, twisted, gull"
         ),
     )
