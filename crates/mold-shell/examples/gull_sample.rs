@@ -12,10 +12,10 @@ use mold_shell::{
     split_with_cumulative_cutters,
 };
 use mold_test_models::{
-    PrintableEnvelope, RibPathSpec, WingEdge, WingSpec, WingSurface, chord_band_region,
-    chord_region_extended, printable_tile_dimensions, registration_diamond,
-    sample_longitudinal_surface_path, sample_rib_surface_path, segment_normal,
-    transverse_flange_blank, wing_segment_boundaries,
+    PrintableEnvelope, RibPathSpec, WingEdge, WingSpec, WingSurface, chord_region_extended,
+    printable_tile_dimensions, registration_diamond, sample_longitudinal_surface_path,
+    sample_rib_surface_path, sampled_chord_band_region, segment_normal, transverse_flange_blank,
+    wing_segment_boundaries,
 };
 
 const FLANGE_MARGIN: f64 = 12.0;
@@ -346,9 +346,8 @@ fn add_segment_join_flanges(
         }
         for pair in section_tiles.windows(2) {
             let chord_fraction = pair[0].chord.1;
-            let start = range.0.max(model_start);
-            let end = range.1.min(model_end);
-            let upper_direction = segment_normal(spec, start, end)?;
+            let upper_direction =
+                segment_normal(spec, range.0.max(model_start), range.1.min(model_end))?;
             let lower_direction = upper_direction.map(|value| -value);
             let make_flange = |surface,
                                direction|
@@ -356,8 +355,8 @@ fn add_segment_join_flanges(
                 let path = sample_longitudinal_surface_path(
                     spec,
                     chord_fraction,
-                    start,
-                    end,
+                    range.0,
+                    range.1,
                     RIB_SAMPLES,
                     surface,
                 )?;
@@ -408,12 +407,14 @@ fn split_mold_into_tiles(
                 }
                 let mut cutters = Vec::with_capacity(section_tiles.len().saturating_sub(1));
                 for tile in section_tiles.iter().take(section_tiles.len() - 1) {
-                    cutters.push(ManifoldSolid(chord_band_region(
+                    cutters.push(ManifoldSolid(sampled_chord_band_region(
                         spec,
                         (0.0, tile.chord.1),
+                        *range,
                         -1_000.0,
                         1_000.0,
                         100.0,
+                        RIB_SAMPLES,
                     )?));
                 }
                 split.extend(split_with_cumulative_cutters(

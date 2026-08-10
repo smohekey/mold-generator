@@ -405,7 +405,7 @@ pub fn sample_longitudinal_surface_path(
     (0..=samples)
         .map(|index| {
             let span = lerp(start_span, end_span, index as f64 / samples as f64);
-            let station = interpolate_station(spec, span)?;
+            let station = interpolate_station_extended(spec, span)?;
             surface_point(spec, &station, station.chord * chord_fraction, surface)
         })
         .collect()
@@ -429,6 +429,24 @@ pub fn interpolate_station(spec: &WingSpec, span: f64) -> Result<WingStation, Wi
     Err(WingError::Geometry(format!(
         "span {span} is outside the wing"
     )))
+}
+
+fn interpolate_station_extended(spec: &WingSpec, span: f64) -> Result<WingStation, WingError> {
+    let first = *spec
+        .stations
+        .first()
+        .ok_or(WingError::InvalidSpec("wing has no stations"))?;
+    let last = *spec
+        .stations
+        .last()
+        .ok_or(WingError::InvalidSpec("wing has no stations"))?;
+    if span < first.span {
+        return Ok(WingStation { span, ..first });
+    }
+    if span > last.span {
+        return Ok(WingStation { span, ..last });
+    }
+    interpolate_station(spec, span)
 }
 
 pub fn transform_station(station: &WingStation, x: f64, z: f64) -> [f64; 3] {
@@ -534,6 +552,50 @@ pub fn chord_band_region(
     }
     close_quad_loft(&mut mesh, spec.stations.len());
     checked_mesh(mesh, "chord band region")
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn sampled_chord_band_region(
+    spec: &WingSpec,
+    chord_range: (f64, f64),
+    span_range: (f64, f64),
+    z_min: f64,
+    z_max: f64,
+    chord_margin: f64,
+    samples: usize,
+) -> Result<Manifold, WingError> {
+    if chord_range.0 < 0.0
+        || chord_range.1 > 1.0
+        || chord_range.1 <= chord_range.0
+        || span_range.1 <= span_range.0
+        || samples == 0
+    {
+        return Err(WingError::InvalidSpec("invalid sampled chord band"));
+    }
+    let mut mesh = MeshGL64 {
+        num_prop: 3,
+        ..Default::default()
+    };
+    for index in 0..=samples {
+        let span = lerp(span_range.0, span_range.1, index as f64 / samples as f64);
+        let station = interpolate_station_extended(spec, span)?;
+        let start = if chord_range.0 == 0.0 {
+            -chord_margin
+        } else {
+            station.chord * chord_range.0
+        };
+        let end = if chord_range.1 == 1.0 {
+            station.chord + chord_margin
+        } else {
+            station.chord * chord_range.1
+        };
+        for &(x, z) in &[(start, z_min), (end, z_min), (end, z_max), (start, z_max)] {
+            mesh.vert_properties
+                .extend(transform_station(&station, x, z));
+        }
+    }
+    close_quad_loft(&mut mesh, samples + 1);
+    checked_mesh(mesh, "sampled chord band region")
 }
 
 /// An offset-airfoil loft used as the source volume for external segment
@@ -1222,6 +1284,23 @@ mod tests {
     fn extended_chord_region_preserves_shell_offset_beyond_wing_root() {
         let spec = preset("gull").unwrap();
         let region = chord_region_extended(&spec, -500.0, 0.0, 80.0, 3.0).unwrap();
+
+        assert!((region.bounding_box().min.y + 3.0).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn sampled_longitudinal_split_reaches_the_offset_root_face() {
+        let spec = preset("gull").unwrap();
+        let region = sampled_chord_band_region(
+            &spec,
+            (0.0, 0.5),
+            (-3.0, 180.0),
+            -1_000.0,
+            1_000.0,
+            100.0,
+            24,
+        )
+        .unwrap();
 
         assert!((region.bounding_box().min.y + 3.0).abs() < 1.0e-9);
     }
