@@ -117,20 +117,8 @@ where
     let positive_bounds = kernel.bounds(&positive_skin)?;
     let mold_bounds = union_bounds(negative_bounds, positive_bounds);
 
-    let negative = clip_sections(
-        kernel,
-        &negative_skin,
-        mold_bounds,
-        section_axis,
-        &sections,
-    )?;
-    let positive = clip_sections(
-        kernel,
-        &positive_skin,
-        mold_bounds,
-        section_axis,
-        &sections,
-    )?;
+    let negative = clip_sections(kernel, &negative_skin, mold_bounds, section_axis, &sections)?;
+    let positive = clip_sections(kernel, &positive_skin, mold_bounds, section_axis, &sections)?;
     Ok(SectionedTwoPartMold { negative, positive })
 }
 
