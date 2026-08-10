@@ -121,9 +121,6 @@ fn diamond_key(
     let inboard_x = flange_center_x(&inboard, side);
     let outboard_x = flange_center_x(&outboard, side);
 
-    // Diamond vertices are ordered around the flange plane: chord-inboard,
-    // span-inboard, chord-outboard, span-outboard. The base extends slightly
-    // into the negative flange so the male key has a robust boolean overlap.
     let footprint = [
         transform_station(&center, center_x - chord_half_width, 0.0),
         transform_station(&inboard, inboard_x, 0.0),
@@ -151,7 +148,6 @@ fn diamond_key(
         mesh.vert_properties.extend(point);
     }
 
-    // Three four-vertex rings: embedded base, parting-plane footprint, top.
     connect_ring(&mut mesh, 0, 4);
     connect_ring(&mut mesh, 4, 8);
     mesh.tri_verts.extend([0, 2, 1, 0, 3, 2]);
@@ -174,8 +170,7 @@ fn flange_center_x(station: &WingStation, side: FlangeSide) -> f64 {
 fn connect_ring(mesh: &mut MeshGL64, lower: u64, upper: u64) {
     for i in 0..4_u64 {
         let next = (i + 1) % 4;
-        mesh.tri_verts
-            .extend([lower + i, upper + i, upper + next]);
+        mesh.tri_verts.extend([lower + i, upper + i, upper + next]);
         mesh.tri_verts
             .extend([lower + i, upper + next, lower + next]);
     }
