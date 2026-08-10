@@ -11,8 +11,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::create_dir_all(output)?;
 
     let mut spec = mold_test_models::preset("gull")?;
-    // Keep the visual sample reasonably quick to generate while preserving
-    // the gull, taper, sweep, dihedral and twist characteristics.
     spec.profile_points = 24;
 
     let wing = mold_test_models::generate(&spec)?;
@@ -20,17 +18,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let lower_region = chord_region(&spec, -500.0, 0.0, 80.0)?;
     let upper_region = chord_region(&spec, 0.0, 500.0, 80.0)?;
+    let lower_flange = chord_region(&spec, -3.0, 0.0, 12.0)?;
+    let upper_flange = chord_region(&spec, 0.0, 3.0, 12.0)?;
 
     let kernel = ManifoldKernel;
     let part = ManifoldSolid(wing);
     let lower_region = ManifoldSolid(lower_region);
     let upper_region = ManifoldSolid(upper_region);
+    let lower_flange = ManifoldSolid(lower_flange);
+    let upper_flange = ManifoldSolid(upper_flange);
     let mold = generate_sectioned_shell_mold_with_parting(
         &kernel,
         &part,
         PartingRegions {
             negative: &lower_region,
             positive: &upper_region,
+            negative_flange: Some(&lower_flange),
+            positive_flange: Some(&upper_flange),
         },
         Axis::Y,
         NonZeroUsize::new(2).unwrap(),
@@ -58,9 +62,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Build a closed clipping volume whose inner boundary follows each wing
-/// station's local chord plane. `z_min`/`z_max` are local airfoil coordinates,
-/// so twist is respected as well as the station's gull/dihedral offset.
 fn chord_region(
     spec: &WingSpec,
     z_min: f64,
@@ -97,8 +98,6 @@ fn chord_region(
         }
     }
 
-    // Root and tip caps. The rectangle ordering is counter-clockwise when
-    // viewed from -Y at the root, matching the side-face winding above.
     mesh.tri_verts.extend([0, 1, 2, 0, 2, 3]);
     let end = ((stations - 1) * 4) as u64;
     mesh.tri_verts
@@ -106,7 +105,7 @@ fn chord_region(
 
     let solid = Manifold::from_mesh_gl64(&mesh);
     if solid.status().to_str() != "No Error" {
-        return Err(format!("invalid chord parting region: {}", solid.status()).into());
+        return Err(format!("invalid chord region: {}", solid.status()).into());
     }
     Ok(solid)
 }
