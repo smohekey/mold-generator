@@ -211,8 +211,7 @@ fn flange_center_x(station: &WingStation, side: FlangeSide) -> f64 {
 fn connect_ring(mesh: &mut MeshGL64, lower: u64, upper: u64) {
     for i in 0..4_u64 {
         let next = (i + 1) % 4;
-        mesh.tri_verts
-            .extend([lower + i, upper + next, upper + i]);
+        mesh.tri_verts.extend([lower + i, upper + next, upper + i]);
         mesh.tri_verts
             .extend([lower + i, lower + next, upper + next]);
     }
