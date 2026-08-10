@@ -5,6 +5,7 @@ members = [
     "crates/mold-manifold",
     "crates/mold-core",
     "crates/mold-shell",
+    "crates/mold-3mf",
     "crates/mold-cli",
     "crates/mold-test-models",
 ]
@@ -17,8 +18,10 @@ rust-version = "1.85"
 [workspace.dependencies]
 manifold-rust = "0.9.2"
 stl_io = "0.11.0"
+zip = { version = "5.1.1", default-features = false, features = ["deflate"] }
 mold-geometry = { path = "crates/mold-geometry" }
 mold-manifold = { path = "crates/mold-manifold" }
 mold-core = { path = "crates/mold-core" }
 mold-shell = { path = "crates/mold-shell" }
+mold-3mf = { path = "crates/mold-3mf" }
 mold-test-models = { path = "crates/mold-test-models" }
