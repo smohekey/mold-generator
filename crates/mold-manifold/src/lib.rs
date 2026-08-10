@@ -72,6 +72,15 @@ impl From<std::io::Error> for ManifoldKernelError {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ManifoldKernel;
 
+/// A plane onto which an end of a swept rib is mitered.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SweepEndPlane {
+    /// Any point on the requested end plane.
+    pub point: [f64; 3],
+    /// The requested plane normal; its magnitude and sign do not affect the cut.
+    pub normal: [f64; 3],
+}
+
 impl ManifoldKernel {
     pub fn import_stl(&self, path: impl AsRef<Path>) -> Result<ManifoldSolid, ManifoldKernelError> {
         let mut file = File::open(path)?;
@@ -141,6 +150,36 @@ impl ManifoldKernel {
         thickness: f64,
         depth: f64,
     ) -> Result<ManifoldSolid, ManifoldKernelError> {
+        self.build_swept_rib(surface_path, direction, thickness, depth, None)
+    }
+
+    /// Sweeps a rib and miters its first and last rings onto explicit planes.
+    pub fn swept_rib_with_end_planes(
+        &self,
+        surface_path: &[[f64; 3]],
+        direction: [f64; 3],
+        thickness: f64,
+        depth: f64,
+        start: SweepEndPlane,
+        end: SweepEndPlane,
+    ) -> Result<ManifoldSolid, ManifoldKernelError> {
+        self.build_swept_rib(
+            surface_path,
+            direction,
+            thickness,
+            depth,
+            Some((start, end)),
+        )
+    }
+
+    fn build_swept_rib(
+        &self,
+        surface_path: &[[f64; 3]],
+        direction: [f64; 3],
+        thickness: f64,
+        depth: f64,
+        end_planes: Option<(SweepEndPlane, SweepEndPlane)>,
+    ) -> Result<ManifoldSolid, ManifoldKernelError> {
         if surface_path.len() < 2 || thickness <= 0.0 || depth <= 0.0 {
             return Err(ManifoldKernelError::InvalidSweep(
                 "requires at least two points and positive thickness/depth",
@@ -150,10 +189,7 @@ impl ManifoldKernel {
             "direction must be non-zero",
         ))?;
         let half = thickness * 0.5;
-        let mut mesh = MeshGL64 {
-            num_prop: 3,
-            ..Default::default()
-        };
+        let mut rings = Vec::with_capacity(surface_path.len());
         for (index, &center) in surface_path.iter().enumerate() {
             let before = surface_path[index.saturating_sub(1)];
             let after = surface_path[(index + 1).min(surface_path.len() - 1)];
@@ -165,7 +201,31 @@ impl ManifoldKernel {
             let surface_right = add_scaled_array(center, side, half);
             let outer_left = add_scaled_array(surface_left, direction, depth);
             let outer_right = add_scaled_array(surface_right, direction, depth);
-            for point in [surface_left, surface_right, outer_right, outer_left] {
+            rings.push([surface_left, surface_right, outer_right, outer_left]);
+        }
+
+        if let Some((start, end)) = end_planes {
+            let start_normal = normalize_array(start.normal).ok_or(
+                ManifoldKernelError::InvalidSweep("start plane normal must be non-zero"),
+            )?;
+            let end_normal = normalize_array(end.normal).ok_or(
+                ManifoldKernelError::InvalidSweep("end plane normal must be non-zero"),
+            )?;
+            let second = rings[1];
+            miter_ring_to_plane(&mut rings[0], &second, start.point, start_normal)?;
+            let penultimate = rings[rings.len() - 2];
+            let last = rings
+                .last_mut()
+                .expect("a swept rib has at least two rings");
+            miter_ring_to_plane(last, &penultimate, end.point, end_normal)?;
+        }
+
+        let mut mesh = MeshGL64 {
+            num_prop: 3,
+            ..Default::default()
+        };
+        for ring in rings {
+            for point in ring {
                 mesh.vert_properties.extend(point);
             }
         }
@@ -352,6 +412,30 @@ fn cross_array(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     ]
 }
 
+fn dot_array(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn miter_ring_to_plane(
+    ring: &mut [[f64; 3]; 4],
+    adjacent: &[[f64; 3]; 4],
+    plane_point: [f64; 3],
+    plane_normal: [f64; 3],
+) -> Result<(), ManifoldKernelError> {
+    for (point, &adjacent_point) in ring.iter_mut().zip(adjacent) {
+        let rail = subtract_array(adjacent_point, *point);
+        let denominator = dot_array(plane_normal, rail);
+        if denominator.abs() <= f64::EPSILON {
+            return Err(ManifoldKernelError::InvalidSweep(
+                "end plane is parallel to a sweep rail",
+            ));
+        }
+        let distance = dot_array(plane_normal, subtract_array(plane_point, *point)) / denominator;
+        *point = add_scaled_array(*point, rail, distance);
+    }
+    Ok(())
+}
+
 fn normalize_array(vector: [f64; 3]) -> Option<[f64; 3]> {
     let length = (vector[0].powi(2) + vector[1].powi(2) + vector[2].powi(2)).sqrt();
     (length > f64::EPSILON).then(|| [vector[0] / length, vector[1] / length, vector[2] / length])
@@ -376,6 +460,32 @@ mod tests {
         assert_eq!(rib.0.status(), ManifoldError::NoError);
         assert!(!rib.0.is_empty());
         assert!(rib.0.volume() > 0.0);
+    }
+
+    #[test]
+    fn swept_rib_end_planes_miter_every_rail_to_the_requested_normals() {
+        let kernel = ManifoldKernel;
+        let rib = kernel
+            .swept_rib_with_end_planes(
+                &[[0.0, 0.75, 0.0], [2.0, 5.75, 1.0], [4.0, 10.75, 2.0]],
+                [0.0, 1.0, 2.0],
+                1.0,
+                3.0,
+                SweepEndPlane {
+                    point: [0.0, 0.0, 0.0],
+                    normal: [0.0, 1.0, 0.0],
+                },
+                SweepEndPlane {
+                    point: [4.0, 10.0, 2.0],
+                    normal: [0.0, 1.0, 0.0],
+                },
+            )
+            .unwrap();
+        let bounds = kernel.bounds(&rib).unwrap();
+
+        assert_eq!(rib.0.status(), ManifoldError::NoError);
+        assert!((bounds.min.y - 0.0).abs() < 1.0e-9);
+        assert!((bounds.max.y - 10.0).abs() < 1.0e-9);
     }
 
     #[test]

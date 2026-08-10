@@ -6,7 +6,7 @@ use std::{
 use mold_3mf::{ThreeMfObject, write_3mf};
 use mold_core::{Axis, SectionedTwoPartMold};
 use mold_geometry::SolidKernel;
-use mold_manifold::{ManifoldKernel, ManifoldSolid};
+use mold_manifold::{ManifoldKernel, ManifoldSolid, SweepEndPlane};
 use mold_shell::{
     BaseAttachmentGeometry, BaseMoldHalves, FlangeDivisionSettings, FlangeEdge, PartingRegions,
     PrintTile, PrintVolume, SegmentBoundary, SegmentFlangeSettings, SegmentationSettings,
@@ -19,8 +19,8 @@ use mold_test_models::{
     PrintableEnvelope, RibPathSpec, WingBaseAttachmentSettings, WingEdge, WingSpec, WingSurface,
     chord_region_extended, printable_tile_dimensions, registration_diamond,
     sample_longitudinal_surface_path, sample_rib_surface_path, sampled_chord_band_region,
-    segment_normal, transverse_flange_blank, wing_base_attachment_geometry,
-    wing_segment_boundaries,
+    segment_normal, transverse_flange_blank, transverse_section_normal,
+    wing_base_attachment_geometry, wing_segment_boundaries,
 };
 
 const FLANGE_MARGIN: f64 = 12.0;
@@ -457,23 +457,39 @@ fn add_segment_join_flanges(
             let upper_direction =
                 segment_normal(spec, range.0.max(model_start), range.1.min(model_end))?;
             let lower_direction = upper_direction.map(|value| -value);
-            let make_flange = |surface,
-                               direction|
-             -> Result<ManifoldSolid, Box<dyn std::error::Error>> {
-                let path = sample_longitudinal_surface_path(
-                    spec,
-                    chord_fraction,
-                    range.0,
-                    range.1,
-                    RIB_SAMPLES,
-                    surface,
-                )?;
-                let path: Vec<[f64; 3]> = path
-                    .into_iter()
-                    .map(|point| add_scaled(point, direction, shell_thickness * 0.8))
-                    .collect();
-                Ok(kernel.swept_rib(&path, direction, settings.axial_thickness, settings.width)?)
-            };
+            let start_normal = transverse_section_normal(spec, range.0)?;
+            let end_normal = transverse_section_normal(spec, range.1)?;
+            let make_flange =
+                |surface, direction| -> Result<ManifoldSolid, Box<dyn std::error::Error>> {
+                    let path = sample_longitudinal_surface_path(
+                        spec,
+                        chord_fraction,
+                        range.0,
+                        range.1,
+                        RIB_SAMPLES,
+                        surface,
+                    )?;
+                    let start_plane = SweepEndPlane {
+                        point: path[0],
+                        normal: start_normal,
+                    };
+                    let end_plane = SweepEndPlane {
+                        point: path[path.len() - 1],
+                        normal: end_normal,
+                    };
+                    let path: Vec<[f64; 3]> = path
+                        .into_iter()
+                        .map(|point| add_scaled(point, direction, shell_thickness * 0.8))
+                        .collect();
+                    Ok(kernel.swept_rib_with_end_planes(
+                        &path,
+                        direction,
+                        settings.axial_thickness,
+                        settings.width,
+                        start_plane,
+                        end_plane,
+                    )?)
+                };
             let lower = make_flange(WingSurface::Lower, lower_direction)?;
             let upper = make_flange(WingSurface::Upper, upper_direction)?;
             mold.negative[section] = kernel.union_attached(&mold.negative[section], &lower)?;

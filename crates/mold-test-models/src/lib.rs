@@ -392,6 +392,17 @@ pub fn segment_normal(
     Ok(normal)
 }
 
+/// Returns the normal of the airfoil section plane, pointing toward increasing span.
+pub fn transverse_section_normal(spec: &WingSpec, span: f64) -> Result<[f64; 3], WingError> {
+    let station = interpolate_station_extended(spec, span)?;
+    let origin = transform_station(&station, 0.0, 0.0);
+    let chord_tangent = subtract(transform_station(&station, station.chord, 0.0), origin);
+    let thickness_tangent = subtract(transform_station(&station, 0.0, 1.0), origin);
+    normalize_array(cross_array(thickness_tangent, chord_tangent)).ok_or(WingError::InvalidSpec(
+        "cannot determine transverse section normal",
+    ))
+}
+
 pub fn sample_rib_surface_path(
     spec: &WingSpec,
     path: RibPathSpec,
@@ -1405,6 +1416,20 @@ mod tests {
         assert!((length - 1.0).abs() < 1.0e-12);
         assert!(normal[2] > 0.0);
         assert!(normal[1].abs() > 0.05);
+    }
+
+    #[test]
+    fn transverse_section_normal_matches_the_lateral_flange_face() {
+        let spec = preset("gull").unwrap();
+        let station = interpolate_station(&spec, 180.0).unwrap();
+        let origin = transform_station(&station, 0.0, 0.0);
+        let chord_tangent = subtract(transform_station(&station, station.chord, 0.0), origin);
+        let thickness_tangent = subtract(transform_station(&station, 0.0, 1.0), origin);
+        let normal = transverse_section_normal(&spec, 180.0).unwrap();
+
+        assert!(dot(normal, chord_tangent).abs() < 1.0e-12);
+        assert!(dot(normal, thickness_tangent).abs() < 1.0e-12);
+        assert!(normal[1] > 0.0);
     }
 
     #[test]
