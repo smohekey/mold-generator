@@ -9,6 +9,7 @@ use mold_shell::{
     SegmentationSettings, ShellSettings, TiledSegmentationSettings, WebbingSettings,
     alternating_rib_layouts, attach_structural_webbing, divide_flange,
     generate_sectioned_shell_mold_with_parting_ranges, partition_tiles_for_print_volume,
+    split_with_cumulative_cutters,
 };
 use mold_test_models::{
     PrintableEnvelope, RibPathSpec, WingEdge, WingSpec, WingSurface, chord_band_region,
@@ -213,15 +214,29 @@ fn split_mold_into_tiles(
     let split_half =
         |pieces: &[ManifoldSolid]| -> Result<Vec<ManifoldSolid>, Box<dyn std::error::Error>> {
             let mut split = Vec::with_capacity(tiles.len());
-            for tile in tiles {
-                let section = ranges
-                    .iter()
-                    .position(|range| *range == tile.span)
-                    .ok_or("print tile does not match a span section")?;
-                let region = ManifoldSolid(chord_band_region(
-                    spec, tile.chord, -1_000.0, 1_000.0, 100.0,
+            for (section, range) in ranges.iter().enumerate() {
+                let first_output = split.len();
+                let section_tiles: Vec<&PrintTile> =
+                    tiles.iter().filter(|tile| tile.span == *range).collect();
+                if section_tiles.is_empty() {
+                    return Err("span section has no print tiles".into());
+                }
+                let mut cutters = Vec::with_capacity(section_tiles.len().saturating_sub(1));
+                for tile in section_tiles.iter().take(section_tiles.len() - 1) {
+                    cutters.push(ManifoldSolid(chord_band_region(
+                        spec,
+                        (0.0, tile.chord.1),
+                        -1_000.0,
+                        1_000.0,
+                        100.0,
+                    )?));
+                }
+                split.extend(split_with_cumulative_cutters(
+                    kernel,
+                    &pieces[section],
+                    &cutters,
                 )?);
-                split.push(kernel.intersection(&pieces[section], &region)?);
+                validate_tile_partition(&pieces[section], &split[first_output..])?;
             }
             Ok(split)
         };
@@ -229,6 +244,25 @@ fn split_mold_into_tiles(
         negative: split_half(&mold.negative)?,
         positive: split_half(&mold.positive)?,
     })
+}
+
+fn validate_tile_partition(
+    original: &ManifoldSolid,
+    tiles: &[ManifoldSolid],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut rejoined = tiles[0].0.clone();
+    for tile in &tiles[1..] {
+        rejoined = rejoined.union(&tile.0);
+    }
+    let missing = original.0.difference(&rejoined).volume();
+    let excess = rejoined.difference(&original.0).volume();
+    if missing > 1.0e-6 || excess > 1.0e-6 {
+        return Err(format!(
+            "tile split changed mold volume: missing={missing:.9}, excess={excess:.9}"
+        )
+        .into());
+    }
+    Ok(())
 }
 
 fn build_registration_inserts(

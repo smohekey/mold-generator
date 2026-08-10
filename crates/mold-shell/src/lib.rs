@@ -500,6 +500,27 @@ where
     Ok(())
 }
 
+/// Splits one solid with ordered cumulative cutters. Every returned neighbor
+/// is derived from the same remainder, making the shared Boolean boundary
+/// authoritative instead of independently intersecting adjacent regions.
+pub fn split_with_cumulative_cutters<K>(
+    kernel: &K,
+    solid: &K::Solid,
+    cutters: &[K::Solid],
+) -> Result<Vec<K::Solid>, K::Error>
+where
+    K: SolidKernel,
+{
+    let mut pieces = Vec::with_capacity(cutters.len() + 1);
+    let mut remainder = solid.clone();
+    for cutter in cutters {
+        pieces.push(kernel.intersection(&remainder, cutter)?);
+        remainder = kernel.difference(&remainder, cutter)?;
+    }
+    pieces.push(remainder);
+    Ok(pieces)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ShellSettings {
     pub thickness: f64,
@@ -1170,6 +1191,30 @@ mod tests {
         assert_eq!(layouts[0].start.span, 20.0);
         assert_eq!(layouts[0].end.span, 140.0);
         assert_ne!(layouts[0].start.edge, layouts[0].end.edge);
+    }
+
+    #[test]
+    fn cumulative_split_rejoins_without_missing_volume() {
+        let kernel = ManifoldKernel;
+        let solid = kernel
+            .cuboid(Bounds3 {
+                min: Vec3::new(0.0, 0.0, 0.0),
+                max: Vec3::new(30.0, 20.0, 10.0),
+            })
+            .unwrap();
+        let cutter = kernel
+            .cuboid(Bounds3 {
+                min: Vec3::new(-1.0, -1.0, -1.0),
+                max: Vec3::new(12.0, 21.0, 11.0),
+            })
+            .unwrap();
+        let pieces = split_with_cumulative_cutters(&kernel, &solid, &[cutter]).unwrap();
+        let rejoined = kernel.union(&pieces[0], &pieces[1]).unwrap();
+
+        assert_eq!(pieces.len(), 2);
+        assert!(solid.0.difference(&rejoined.0).volume() < 1.0e-9);
+        assert!(rejoined.0.difference(&solid.0).volume() < 1.0e-9);
+        assert!(pieces[0].0.intersection(&pieces[1].0).volume() < 1.0e-9);
     }
 
     #[test]
