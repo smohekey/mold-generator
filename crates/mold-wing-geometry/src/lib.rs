@@ -518,8 +518,24 @@ pub fn chord_region_extended(
     chord_margin: f64,
     span_margin: f64,
 ) -> Result<Manifold, WingError> {
-    if span_margin < 0.0 {
-        return Err(WingError::InvalidSpec("span margin cannot be negative"));
+    chord_region_with_span_margins(spec, z_min, z_max, chord_margin, (span_margin, span_margin))
+}
+
+pub fn chord_region_with_span_margins(
+    spec: &WingSpec,
+    z_min: f64,
+    z_max: f64,
+    chord_margin: f64,
+    span_margins: (f64, f64),
+) -> Result<Manifold, WingError> {
+    if !span_margins.0.is_finite()
+        || !span_margins.1.is_finite()
+        || span_margins.0 < 0.0
+        || span_margins.1 < 0.0
+    {
+        return Err(WingError::InvalidSpec(
+            "span margins must be finite and non-negative",
+        ));
     }
     let first = *spec
         .stations
@@ -530,16 +546,16 @@ pub fn chord_region_extended(
         .last()
         .ok_or(WingError::InvalidSpec("wing has no stations"))?;
     let mut stations = Vec::with_capacity(spec.stations.len() + 2);
-    if span_margin > 0.0 {
+    if span_margins.0 > 0.0 {
         stations.push(WingStation {
-            span: first.span - span_margin,
+            span: first.span - span_margins.0,
             ..first
         });
     }
     stations.extend(spec.stations.iter().copied());
-    if span_margin > 0.0 {
+    if span_margins.1 > 0.0 {
         stations.push(WingStation {
-            span: last.span + span_margin,
+            span: last.span + span_margins.1,
             ..last
         });
     }
@@ -877,7 +893,12 @@ pub fn wing_base_attachment_geometry(
     }
 
     let flange_end = attachment_span + settings.axial_thickness;
-    let opening = transverse_profile_blank(spec, &[attachment_span, model_start])?;
+    // Extend the opening cutter through the mating face so the spanwise cap of
+    // any parting flange cannot survive as a coincident chordwise seam.
+    let opening = transverse_profile_blank(
+        spec,
+        &[attachment_span - settings.axial_thickness, model_start],
+    )?;
     let flange_core = transverse_profile_blank(spec, &[attachment_span, flange_end])?;
     let flange_outer = transverse_flange_blank(
         spec,
@@ -1501,6 +1522,16 @@ mod tests {
     }
 
     #[test]
+    fn asymmetric_chord_region_leaves_the_root_base_zone_clear() {
+        let spec = preset("gull").unwrap();
+        let region = chord_region_with_span_margins(&spec, 0.0, 3.0, 12.0, (0.0, 3.0)).unwrap();
+        let bounds = region.bounding_box();
+
+        assert!((bounds.min.y - 0.0).abs() < 1.0e-9);
+        assert!((bounds.max.y - 603.0).abs() < 1.0e-9);
+    }
+
+    #[test]
     fn sampled_longitudinal_split_reaches_the_offset_root_face() {
         let spec = preset("gull").unwrap();
         let region = sampled_chord_band_region(
@@ -1580,5 +1611,25 @@ mod tests {
 
         assert!(flange.intersection(&geometry.opening).volume() < 1.0e-6);
         assert!((seal.bounding_box().max.y + 3.0).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn base_opening_cutter_crosses_the_attachment_plane() {
+        let spec = preset("gull").unwrap();
+        let geometry = wing_base_attachment_geometry(
+            &spec,
+            -3.0,
+            WingBaseAttachmentSettings {
+                flange_width: 14.4,
+                axial_thickness: 3.0,
+                registration: WingBaseRegistrationSettings::default(),
+            },
+        )
+        .unwrap();
+        let bounds = geometry.opening.bounding_box();
+
+        assert!((bounds.min.y + 6.0).abs() < 1.0e-9);
+        assert!((bounds.max.y - 0.0).abs() < 1.0e-9);
+        assert!(bounds.min.y < -3.0 && bounds.max.y > -3.0);
     }
 }
