@@ -397,6 +397,8 @@ fn diagonal_ribs(
     for &(start, end) in segment_ranges {
         let mut lower_segment = Vec::new();
         let mut upper_segment = Vec::new();
+        let upper_normal = segment_normal(spec, start, end)?;
+        let lower_normal = [-upper_normal[0], -upper_normal[1], -upper_normal[2]];
         let leading_fixtures = fixture_spans(start, end, registration.leading, registration);
         let trailing_fixtures = fixture_spans(start, end, registration.trailing, registration);
         let leading = spans_between(&leading_fixtures);
@@ -420,10 +422,24 @@ fn diagonal_ribs(
                 )
             };
             lower_segment.push(ManifoldSolid(profiled_rib(
-                spec, a_side, a_span, b_side, b_span, thickness, -depth,
+                spec,
+                a_side,
+                a_span,
+                b_side,
+                b_span,
+                thickness,
+                -depth,
+                lower_normal,
             )?));
             upper_segment.push(ManifoldSolid(profiled_rib(
-                spec, a_side, a_span, b_side, b_span, thickness, depth,
+                spec,
+                a_side,
+                a_span,
+                b_side,
+                b_span,
+                thickness,
+                depth,
+                upper_normal,
             )?));
         }
         lower.push(lower_segment);
@@ -437,6 +453,31 @@ fn spans_between(fixtures: &[f64]) -> Vec<f64> {
         .windows(2)
         .map(|pair| (pair[0] + pair[1]) * 0.5)
         .collect()
+}
+
+fn segment_normal(
+    spec: &WingSpec,
+    start_span: f64,
+    end_span: f64,
+) -> Result<[f64; 3], Box<dyn std::error::Error>> {
+    let model_start = spec.stations.first().ok_or("wing has no stations")?.span;
+    let model_end = spec.stations.last().ok_or("wing has no stations")?.span;
+    let start = interpolate_station(spec, start_span.max(model_start))?;
+    let end = interpolate_station(spec, end_span.min(model_end))?;
+    let center = interpolate_station(spec, (start.span + end.span) * 0.5)?;
+    let chord_tangent = sub(
+        transform_station(&center, center.chord, 0.0),
+        transform_station(&center, 0.0, 0.0),
+    );
+    let span_tangent = sub(
+        transform_station(&end, end.chord * 0.5, 0.0),
+        transform_station(&start, start.chord * 0.5, 0.0),
+    );
+    let mut normal = normalize(cross(chord_tangent, span_tangent))?;
+    if normal[2] < 0.0 {
+        normal = [-normal[0], -normal[1], -normal[2]];
+    }
+    Ok(normal)
 }
 
 fn attach_ribs(
@@ -490,6 +531,7 @@ fn validate_attached_webbing(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn profiled_rib(
     spec: &WingSpec,
     start_side: FlangeSide,
@@ -498,6 +540,7 @@ fn profiled_rib(
     end_span: f64,
     thickness: f64,
     depth: f64,
+    vertical: [f64; 3],
 ) -> Result<Manifold, Box<dyn std::error::Error>> {
     const SAMPLES: usize = 24;
     let upper = depth > 0.0;
@@ -522,20 +565,11 @@ fn profiled_rib(
         let before = centers[index.saturating_sub(1)];
         let after = centers[(index + 1).min(SAMPLES)];
         let tangent = sub(after, before);
-        let t = index as f64 / SAMPLES as f64;
-        let span = lerp(start_span, end_span, t);
-        let station = interpolate_station(spec, span)?;
-        let x = lerp(
-            rib_endpoint_x(&station, start_side, thickness),
-            rib_endpoint_x(&station, end_side, thickness),
-            t,
-        );
-        let normal = profile_surface_normal(spec, &station, x, upper)?;
-        let side = normalize(cross(normal, tangent))?;
+        let side = normalize(cross(vertical, tangent))?;
         let surface_left = add_scaled(center, side, -half);
         let surface_right = add_scaled(center, side, half);
-        let outer_left = add_scaled(surface_left, normal, depth.abs());
-        let outer_right = add_scaled(surface_right, normal, depth.abs());
+        let outer_left = add_scaled(surface_left, vertical, depth.abs());
+        let outer_right = add_scaled(surface_right, vertical, depth.abs());
         let ring = if upper {
             [surface_left, surface_right, outer_right, outer_left]
         } else {
@@ -557,40 +591,6 @@ fn profiled_rib(
         return Err(format!("invalid diagonal rib: {}", solid.status()).into());
     }
     Ok(solid)
-}
-
-fn profile_surface_normal(
-    spec: &WingSpec,
-    station: &WingStation,
-    x: f64,
-    upper: bool,
-) -> Result<[f64; 3], Box<dyn std::error::Error>> {
-    let chord_step = 0.5_f64.min(station.chord * 0.01);
-    let chord_before = profile_surface_point(spec, station, x - chord_step, upper)?;
-    let chord_after = profile_surface_point(spec, station, x + chord_step, upper)?;
-    let chord_tangent = sub(chord_after, chord_before);
-
-    let first_span = spec.stations.first().ok_or("wing has no stations")?.span;
-    let last_span = spec.stations.last().ok_or("wing has no stations")?.span;
-    let span_before = (station.span - 0.5).max(first_span);
-    let span_after = (station.span + 0.5).min(last_span);
-    let fraction = (x / station.chord).clamp(0.0, 1.0);
-    let before_station = interpolate_station(spec, span_before)?;
-    let after_station = interpolate_station(spec, span_after)?;
-    let before = profile_surface_point(
-        spec,
-        &before_station,
-        fraction * before_station.chord,
-        upper,
-    )?;
-    let after = profile_surface_point(spec, &after_station, fraction * after_station.chord, upper)?;
-    let span_tangent = sub(after, before);
-    let mut normal = normalize(cross(chord_tangent, span_tangent))?;
-    let desired_z = if upper { 1.0 } else { -1.0 };
-    if normal[2] * desired_z < 0.0 {
-        normal = [-normal[0], -normal[1], -normal[2]];
-    }
-    Ok(normal)
 }
 
 fn profile_surface_point(
