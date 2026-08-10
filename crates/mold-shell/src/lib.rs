@@ -108,17 +108,26 @@ where
     for socket in parting.positive_sockets {
         positive_skin = kernel.difference(&positive_skin, socket)?;
     }
+
+    // Clip using the bounds of the finished halves, not just the offset part.
+    // A flange can extend beyond the shell thickness, and registration sockets
+    // may live entirely in that extension. Using `expanded_bounds` here would
+    // trim those flange regions (and their sockets) back off after construction.
+    let negative_bounds = kernel.bounds(&negative_skin)?;
+    let positive_bounds = kernel.bounds(&positive_skin)?;
+    let mold_bounds = union_bounds(negative_bounds, positive_bounds);
+
     let negative = clip_sections(
         kernel,
         &negative_skin,
-        expanded_bounds,
+        mold_bounds,
         section_axis,
         &sections,
     )?;
     let positive = clip_sections(
         kernel,
         &positive_skin,
-        expanded_bounds,
+        mold_bounds,
         section_axis,
         &sections,
     )?;
@@ -143,6 +152,21 @@ where
         pieces.push(kernel.intersection(solid, &kernel.cuboid(clip)?)?);
     }
     Ok(pieces)
+}
+
+fn union_bounds(a: Bounds3, b: Bounds3) -> Bounds3 {
+    Bounds3 {
+        min: Vec3::new(
+            a.min.x.min(b.min.x),
+            a.min.y.min(b.min.y),
+            a.min.z.min(b.min.z),
+        ),
+        max: Vec3::new(
+            a.max.x.max(b.max.x),
+            a.max.y.max(b.max.y),
+            a.max.z.max(b.max.z),
+        ),
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
