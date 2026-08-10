@@ -26,11 +26,13 @@ impl Default for ShellSettings {
 /// Explicit geometry used to divide a shell into its two mold halves.
 ///
 /// The regions should cover the mold envelope and meet at the desired parting
-/// surface. This lets a curved or piecewise-planar parting surface follow a
-/// wing's local chord plane instead of forcing a single world-space plane.
+/// surface. Optional flange solids can be supplied for each side when the
+/// parting surface is non-planar.
 pub struct PartingRegions<'a, S> {
     pub negative: &'a S,
     pub positive: &'a S,
+    pub negative_flange: Option<&'a S>,
+    pub positive_flange: Option<&'a S>,
 }
 
 pub fn generate_sectioned_shell_mold<K>(
@@ -85,10 +87,6 @@ where
 /// Generate a shell mold using caller-supplied clipping solids for the two
 /// halves. Unlike the axis-aligned helper above, this supports non-planar
 /// parting surfaces such as gull/dihedral wings.
-///
-/// At this stage the explicit-parting path intentionally does not add a split
-/// flange: the clipping geometry defines the correct parting face first. A
-/// flange that follows that surface can be layered on independently.
 pub fn generate_sectioned_shell_mold_with_parting<K>(
     kernel: &K,
     part: &K::Solid,
@@ -105,8 +103,17 @@ where
     let expanded_bounds = kernel.bounds(&expanded)?;
     let sections = section_ranges(expanded_bounds, section_axis, section_count);
 
-    let negative_skin = kernel.intersection(&skin, parting.negative)?;
-    let positive_skin = kernel.intersection(&skin, parting.positive)?;
+    let mut negative_skin = kernel.intersection(&skin, parting.negative)?;
+    let mut positive_skin = kernel.intersection(&skin, parting.positive)?;
+
+    if let Some(flange) = parting.negative_flange {
+        let flange = kernel.difference(flange, part)?;
+        negative_skin = kernel.union(&negative_skin, &flange)?;
+    }
+    if let Some(flange) = parting.positive_flange {
+        let flange = kernel.difference(flange, part)?;
+        positive_skin = kernel.union(&positive_skin, &flange)?;
+    }
 
     let negative = clip_sections(
         kernel,
