@@ -213,7 +213,10 @@ mod tests {
 
     #[test]
     fn color_serializes_as_rgba_hex() {
-        assert_eq!(ThreeMfColor::rgb(0x12, 0x34, 0xAB).display_color(), "#1234ABFF");
+        assert_eq!(
+            ThreeMfColor::rgb(0x12, 0x34, 0xAB).display_color(),
+            "#1234ABFF"
+        );
     }
 
     #[test]
