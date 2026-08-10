@@ -2,7 +2,6 @@ use std::num::NonZeroUsize;
 
 use manifold_rust::{manifold::Manifold, types::MeshGL64};
 use mold_core::Axis;
-use mold_geometry::SolidKernel;
 use mold_manifold::{ManifoldKernel, ManifoldSolid};
 use mold_shell::{PartingRegions, ShellSettings, generate_sectioned_shell_mold_with_parting};
 use mold_test_models::{WingSpec, WingStation};
@@ -65,18 +64,63 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut upper_total = 0.0;
         for (index, piece) in mold.negative.iter().enumerate() {
             let volume = piece.0.intersection(&insert.0).volume();
-            println!("insert {name}: lower piece {} intersection={volume:.6}", index + 1);
+            println!(
+                "insert {name}: lower piece {} intersection={volume:.6}",
+                index + 1
+            );
             lower_total += volume;
         }
         for (index, piece) in mold.positive.iter().enumerate() {
             let volume = piece.0.intersection(&insert.0).volume();
-            println!("insert {name}: upper piece {} intersection={volume:.6}", index + 1);
+            println!(
+                "insert {name}: upper piece {} intersection={volume:.6}",
+                index + 1
+            );
             upper_total += volume;
         }
         println!("insert {name}: final-piece totals lower={lower_total:.6} upper={upper_total:.6}");
         if lower_total <= 1e-6 || upper_total <= 1e-6 {
             return Err(format!(
                 "registration insert {name} does not intersect both finished mold halves"
+            )
+            .into());
+        }
+    }
+
+    let cutters = [&insert_a, &insert_b];
+    let cut_mold = generate_sectioned_shell_mold_with_parting(
+        &kernel,
+        &part,
+        PartingRegions {
+            negative: &lower_region,
+            positive: &upper_region,
+            negative_flange: Some(&lower_flange),
+            positive_flange: Some(&upper_flange),
+            negative_sockets: &cutters,
+            positive_sockets: &cutters,
+        },
+        Axis::Y,
+        NonZeroUsize::new(2).unwrap(),
+        ShellSettings::default(),
+    )?;
+
+    for (name, insert) in [("a", &insert_a), ("b", &insert_b)] {
+        let lower_remaining: f64 = cut_mold
+            .negative
+            .iter()
+            .map(|piece| piece.0.intersection(&insert.0).volume())
+            .sum();
+        let upper_remaining: f64 = cut_mold
+            .positive
+            .iter()
+            .map(|piece| piece.0.intersection(&insert.0).volume())
+            .sum();
+        println!(
+            "insert {name}: post-cut remaining overlap lower={lower_remaining:.9} upper={upper_remaining:.9}"
+        );
+        if lower_remaining > 1e-6 || upper_remaining > 1e-6 {
+            return Err(format!(
+                "registration socket {name} subtraction left material in the insert volume"
             )
             .into());
         }
@@ -167,7 +211,8 @@ fn flange_center_x(station: &WingStation, side: FlangeSide) -> f64 {
 fn connect_ring(mesh: &mut MeshGL64, lower: u64, upper: u64) {
     for i in 0..4_u64 {
         let next = (i + 1) % 4;
-        mesh.tri_verts.extend([lower + i, upper + i, upper + next]);
+        mesh.tri_verts
+            .extend([lower + i, upper + i, upper + next]);
         mesh.tri_verts
             .extend([lower + i, upper + next, lower + next]);
     }
