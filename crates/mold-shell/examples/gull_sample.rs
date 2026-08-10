@@ -2,7 +2,7 @@ use std::{fs, path::Path};
 
 use manifold_rust::{manifold::Manifold, types::MeshGL64};
 use mold_3mf::{ThreeMfObject, write_3mf};
-use mold_core::Axis;
+use mold_core::{Axis, SectionedTwoPartMold};
 use mold_geometry::SolidKernel;
 use mold_manifold::{ManifoldKernel, ManifoldSolid};
 use mold_shell::{
@@ -111,23 +111,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         baseline_settings,
     )?;
 
-    let mut mold = generate_sectioned_shell_mold_with_parting_ranges(
-        &kernel,
-        &part,
-        PartingRegions {
-            negative: &lower_region,
-            positive: &upper_region,
-            negative_flange: Some(&lower_flange),
-            positive_flange: Some(&upper_flange),
-            negative_sockets: &socket_cutters,
-            positive_sockets: &socket_cutters,
-            negative_webbing_exclusions: &[],
-            positive_webbing_exclusions: &[],
-        },
-        Axis::Y,
-        &segment_ranges,
-        baseline_settings,
-    )?;
+    // Build the webbed version from the exact baseline solids. Regenerating
+    // the offset shell a second time introduces tiny mesh differences that
+    // contaminate the diagnostic `webbed - baseline` objects with shell faces.
+    let mut mold = SectionedTwoPartMold {
+        negative: baseline.negative.clone(),
+        positive: baseline.positive.clone(),
+    };
 
     attach_ribs(
         &kernel,
@@ -494,6 +484,7 @@ fn profiled_rib(
     depth: f64,
 ) -> Result<Manifold, Box<dyn std::error::Error>> {
     const SAMPLES: usize = 24;
+    let upper = depth > 0.0;
     let centers: Vec<[f64; 3]> = (0..=SAMPLES)
         .map(|index| {
             let t = index as f64 / SAMPLES as f64;
@@ -502,7 +493,7 @@ fn profiled_rib(
             let start_x = flange_center_x(&station, start_side);
             let end_x = flange_center_x(&station, end_side);
             let x = lerp(start_x, end_x, t);
-            profile_surface_point(spec, &station, x, depth > 0.0)
+            profile_surface_point(spec, &station, x, upper)
         })
         .collect::<Result<_, Box<dyn std::error::Error>>>()?;
 
@@ -515,12 +506,21 @@ fn profiled_rib(
         let before = centers[index.saturating_sub(1)];
         let after = centers[(index + 1).min(SAMPLES)];
         let tangent = sub(after, before);
-        let side = normalize([-tangent[1], tangent[0], 0.0])?;
+        let t = index as f64 / SAMPLES as f64;
+        let span = lerp(start_span, end_span, t);
+        let station = interpolate_station(spec, span)?;
+        let x = lerp(
+            flange_center_x(&station, start_side),
+            flange_center_x(&station, end_side),
+            t,
+        );
+        let normal = profile_surface_normal(spec, &station, x, upper)?;
+        let side = normalize(cross(normal, tangent))?;
         let surface_left = add_scaled(center, side, -half);
         let surface_right = add_scaled(center, side, half);
-        let outer_left = [surface_left[0], surface_left[1], surface_left[2] + depth];
-        let outer_right = [surface_right[0], surface_right[1], surface_right[2] + depth];
-        let ring = if depth > 0.0 {
+        let outer_left = add_scaled(surface_left, normal, depth.abs());
+        let outer_right = add_scaled(surface_right, normal, depth.abs());
+        let ring = if upper {
             [surface_left, surface_right, outer_right, outer_left]
         } else {
             [outer_left, outer_right, surface_right, surface_left]
@@ -541,6 +541,40 @@ fn profiled_rib(
         return Err(format!("invalid diagonal rib: {}", solid.status()).into());
     }
     Ok(solid)
+}
+
+fn profile_surface_normal(
+    spec: &WingSpec,
+    station: &WingStation,
+    x: f64,
+    upper: bool,
+) -> Result<[f64; 3], Box<dyn std::error::Error>> {
+    let chord_step = 0.5_f64.min(station.chord * 0.01);
+    let chord_before = profile_surface_point(spec, station, x - chord_step, upper)?;
+    let chord_after = profile_surface_point(spec, station, x + chord_step, upper)?;
+    let chord_tangent = sub(chord_after, chord_before);
+
+    let first_span = spec.stations.first().ok_or("wing has no stations")?.span;
+    let last_span = spec.stations.last().ok_or("wing has no stations")?.span;
+    let span_before = (station.span - 0.5).max(first_span);
+    let span_after = (station.span + 0.5).min(last_span);
+    let fraction = (x / station.chord).clamp(0.0, 1.0);
+    let before_station = interpolate_station(spec, span_before)?;
+    let after_station = interpolate_station(spec, span_after)?;
+    let before = profile_surface_point(
+        spec,
+        &before_station,
+        fraction * before_station.chord,
+        upper,
+    )?;
+    let after = profile_surface_point(spec, &after_station, fraction * after_station.chord, upper)?;
+    let span_tangent = sub(after, before);
+    let mut normal = normalize(cross(chord_tangent, span_tangent))?;
+    let desired_z = if upper { 1.0 } else { -1.0 };
+    if normal[2] * desired_z < 0.0 {
+        normal = [-normal[0], -normal[1], -normal[2]];
+    }
+    Ok(normal)
 }
 
 fn profile_surface_point(
