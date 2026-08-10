@@ -125,7 +125,8 @@ fn diamond_key(
             (center_x + half_width, 0.0),
             (center_x, height),
         ] {
-            mesh.vert_properties.extend(transform_station(station, x, z));
+            mesh.vert_properties
+                .extend(transform_station(station, x, z));
         }
     }
 
@@ -180,7 +181,8 @@ fn chord_region(
             (station.chord + chord_margin, z_max),
             (-chord_margin, z_max),
         ] {
-            mesh.vert_properties.extend(transform_station(station, x, z));
+            mesh.vert_properties
+                .extend(transform_station(station, x, z));
         }
     }
 
