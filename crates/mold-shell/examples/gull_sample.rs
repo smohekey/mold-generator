@@ -140,8 +140,8 @@ fn diamond_key(
     }
 
     connect_ring(&mut mesh, 0, 4);
-    mesh.tri_verts.extend([0, 2, 1, 0, 3, 2]);
-    mesh.tri_verts.extend([4, 5, 6, 4, 6, 7]);
+    mesh.tri_verts.extend([0, 1, 2, 0, 2, 3]);
+    mesh.tri_verts.extend([4, 6, 5, 4, 7, 6]);
 
     let solid = Manifold::from_mesh_gl64(&mesh);
     if solid.status().to_str() != "No Error" {
