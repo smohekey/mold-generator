@@ -27,6 +27,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Diagnose registration intersections
+        run: cargo run -p mold-shell --example socket_debug --release
       - name: Generate gull wing and shell mold
         run: cargo run -p mold-shell --example gull_sample --release
       - name: Upload visual sample
