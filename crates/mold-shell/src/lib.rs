@@ -108,8 +108,20 @@ where
     let negative_skin = kernel.intersection(&skin, parting.negative)?;
     let positive_skin = kernel.intersection(&skin, parting.positive)?;
 
-    let negative = clip_sections(kernel, &negative_skin, expanded_bounds, section_axis, &sections)?;
-    let positive = clip_sections(kernel, &positive_skin, expanded_bounds, section_axis, &sections)?;
+    let negative = clip_sections(
+        kernel,
+        &negative_skin,
+        expanded_bounds,
+        section_axis,
+        &sections,
+    )?;
+    let positive = clip_sections(
+        kernel,
+        &positive_skin,
+        expanded_bounds,
+        section_axis,
+        &sections,
+    )?;
 
     Ok(SectionedTwoPartMold { negative, positive })
 }
