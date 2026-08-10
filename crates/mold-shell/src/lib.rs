@@ -36,6 +36,125 @@ impl Default for WebbingSettings {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FlangeDivisionSettings {
+    pub fixture_span: f64,
+    pub max_spacing_ratio: f64,
+    pub edge_margin_ratio: f64,
+    pub minimum_per_segment: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlangeEdge {
+    Leading,
+    Trailing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RibEndpoint {
+    pub edge: FlangeEdge,
+    pub span: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RibLayout {
+    pub start: RibEndpoint,
+    pub end: RibEndpoint,
+}
+
+pub fn divide_flange(range: (f64, f64), settings: FlangeDivisionSettings) -> Vec<f64> {
+    let edge_margin = settings.fixture_span * settings.edge_margin_ratio;
+    let max_spacing = settings.fixture_span * settings.max_spacing_ratio;
+    let usable_start = range.0 + edge_margin;
+    let usable_end = range.1 - edge_margin;
+    let usable_length = (usable_end - usable_start).max(0.0);
+    let spacing_count = if max_spacing > 0.0 {
+        (usable_length / max_spacing).ceil() as usize
+    } else {
+        1
+    };
+    let count = settings.minimum_per_segment.max(spacing_count + 1);
+
+    (0..count)
+        .map(|index| {
+            let t = if count == 1 {
+                0.5
+            } else {
+                index as f64 / (count - 1) as f64
+            };
+            usable_start + usable_length * t
+        })
+        .collect()
+}
+
+pub fn alternating_rib_layouts(
+    leading_fixtures: &[f64],
+    trailing_fixtures: &[f64],
+) -> Vec<RibLayout> {
+    let leading: Vec<f64> = leading_fixtures
+        .windows(2)
+        .map(|pair| (pair[0] + pair[1]) * 0.5)
+        .collect();
+    let trailing: Vec<f64> = trailing_fixtures
+        .windows(2)
+        .map(|pair| (pair[0] + pair[1]) * 0.5)
+        .collect();
+    let count = leading.len().min(trailing.len());
+
+    (0..count.saturating_sub(1))
+        .map(|index| {
+            if index % 2 == 0 {
+                RibLayout {
+                    start: RibEndpoint {
+                        edge: FlangeEdge::Leading,
+                        span: leading[index],
+                    },
+                    end: RibEndpoint {
+                        edge: FlangeEdge::Trailing,
+                        span: trailing[index + 1],
+                    },
+                }
+            } else {
+                RibLayout {
+                    start: RibEndpoint {
+                        edge: FlangeEdge::Trailing,
+                        span: trailing[index],
+                    },
+                    end: RibEndpoint {
+                        edge: FlangeEdge::Leading,
+                        span: leading[index + 1],
+                    },
+                }
+            }
+        })
+        .collect()
+}
+
+pub fn attach_structural_webbing<K>(
+    kernel: &K,
+    part: &K::Solid,
+    pieces: &mut [K::Solid],
+    ribs_by_piece: &[Vec<K::Solid>],
+    exclusions: &[&K::Solid],
+) -> Result<(), K::Error>
+where
+    K: SolidKernel,
+{
+    for (piece, ribs) in pieces.iter_mut().zip(ribs_by_piece) {
+        for rib in ribs {
+            let mut printable = kernel.difference(rib, part)?;
+            for exclusion in exclusions {
+                printable = kernel.difference(&printable, exclusion)?;
+            }
+            *piece = kernel.union_attached(piece, &printable)?;
+        }
+        for exclusion in exclusions {
+            *piece = kernel.difference(piece, exclusion)?;
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ShellSettings {
     pub thickness: f64,
     pub flange_width: f64,
@@ -665,6 +784,36 @@ fn set_max(b: &mut Bounds3, a: Axis, v: f64) {
 mod tests {
     use super::*;
     use mold_manifold::ManifoldKernel;
+
+    const DIVISION: FlangeDivisionSettings = FlangeDivisionSettings {
+        fixture_span: 14.0,
+        max_spacing_ratio: 10.0,
+        edge_margin_ratio: 1.5,
+        minimum_per_segment: 2,
+    };
+
+    #[test]
+    fn flange_divisions_respect_fixture_margins_and_spacing() {
+        let divisions = divide_flange((0.0, 200.0), DIVISION);
+
+        assert_eq!(divisions, vec![21.0, 100.0, 179.0]);
+    }
+
+    #[test]
+    fn rib_layouts_alternate_between_flange_edges() {
+        let fixtures = [20.0, 80.0, 140.0, 200.0];
+        let layouts = alternating_rib_layouts(&fixtures, &fixtures);
+
+        assert_eq!(layouts.len(), 2);
+        assert_eq!(layouts[0].start.edge, FlangeEdge::Leading);
+        assert_eq!(layouts[0].end.edge, FlangeEdge::Trailing);
+        assert_eq!(layouts[0].start.span, 50.0);
+        assert_eq!(layouts[0].end.span, 110.0);
+        assert_eq!(layouts[1].start.edge, FlangeEdge::Trailing);
+        assert_eq!(layouts[1].end.edge, FlangeEdge::Leading);
+        assert_eq!(layouts[1].start.span, 110.0);
+        assert_eq!(layouts[1].end.span, 170.0);
+    }
 
     #[test]
     fn cuboid_shell_is_thinner_than_a_solid_block() {

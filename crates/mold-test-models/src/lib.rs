@@ -40,6 +40,399 @@ pub struct WingSpec {
     pub closed_trailing_edge: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WingEdge {
+    Leading,
+    Trailing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WingSurface {
+    Lower,
+    Upper,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RibPathSpec {
+    pub start_edge: WingEdge,
+    pub start_span: f64,
+    pub end_edge: WingEdge,
+    pub end_span: f64,
+    pub flange_margin: f64,
+    pub rib_thickness: f64,
+    pub samples: usize,
+    pub surface: WingSurface,
+}
+
+pub fn deviation_aware_segment_ranges(
+    spec: &WingSpec,
+    segment_count: usize,
+    outer_min: f64,
+    outer_max: f64,
+) -> Result<Vec<(f64, f64)>, WingError> {
+    if segment_count == 0 {
+        return Err(WingError::InvalidSpec("segment count must be positive"));
+    }
+    let first = spec
+        .stations
+        .first()
+        .ok_or(WingError::InvalidSpec("wing has no stations"))?
+        .span;
+    let last = spec
+        .stations
+        .last()
+        .ok_or(WingError::InvalidSpec("wing has no stations"))?
+        .span;
+    let mut candidates: Vec<(f64, f64)> = spec
+        .stations
+        .windows(3)
+        .map(|stations| {
+            let incoming = station_axis(stations[0], stations[1]);
+            let outgoing = station_axis(stations[1], stations[2]);
+            (
+                stations[1].span,
+                dot(incoming, outgoing).clamp(-1.0, 1.0).acos(),
+            )
+        })
+        .collect();
+    candidates.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let mut boundaries: Vec<f64> = candidates
+        .into_iter()
+        .take(segment_count.saturating_sub(1))
+        .map(|candidate| candidate.0)
+        .collect();
+    for index in 1..segment_count {
+        if boundaries.len() == segment_count - 1 {
+            break;
+        }
+        let fallback = first + (last - first) * index as f64 / segment_count as f64;
+        if !boundaries
+            .iter()
+            .any(|value| (value - fallback).abs() < 1.0e-6)
+        {
+            boundaries.push(fallback);
+        }
+    }
+    boundaries.sort_by(f64::total_cmp);
+    boundaries.truncate(segment_count.saturating_sub(1));
+    let mut edges = Vec::with_capacity(segment_count + 1);
+    edges.push(outer_min);
+    edges.extend(boundaries);
+    edges.push(outer_max);
+    Ok(edges.windows(2).map(|edge| (edge[0], edge[1])).collect())
+}
+
+pub fn segment_normal(
+    spec: &WingSpec,
+    start_span: f64,
+    end_span: f64,
+) -> Result<[f64; 3], WingError> {
+    let model_start = spec
+        .stations
+        .first()
+        .ok_or(WingError::InvalidSpec("wing has no stations"))?
+        .span;
+    let model_end = spec
+        .stations
+        .last()
+        .ok_or(WingError::InvalidSpec("wing has no stations"))?
+        .span;
+    let start = interpolate_station(spec, start_span.max(model_start))?;
+    let end = interpolate_station(spec, end_span.min(model_end))?;
+    let center = interpolate_station(spec, (start.span + end.span) * 0.5)?;
+    let chord_tangent = subtract(
+        transform_station(&center, center.chord, 0.0),
+        transform_station(&center, 0.0, 0.0),
+    );
+    let span_tangent = subtract(
+        transform_station(&end, end.chord * 0.5, 0.0),
+        transform_station(&start, start.chord * 0.5, 0.0),
+    );
+    let mut normal = normalize_array(cross_array(chord_tangent, span_tangent))
+        .ok_or(WingError::InvalidSpec("cannot determine segment normal"))?;
+    if normal[2] < 0.0 {
+        normal = [-normal[0], -normal[1], -normal[2]];
+    }
+    Ok(normal)
+}
+
+pub fn sample_rib_surface_path(
+    spec: &WingSpec,
+    path: RibPathSpec,
+) -> Result<Vec<[f64; 3]>, WingError> {
+    if path.samples == 0 {
+        return Err(WingError::InvalidSpec("rib samples must be positive"));
+    }
+    (0..=path.samples)
+        .map(|index| {
+            let t = index as f64 / path.samples as f64;
+            let station = interpolate_station(spec, lerp(path.start_span, path.end_span, t))?;
+            let start_x = rib_endpoint_x(
+                &station,
+                path.start_edge,
+                path.flange_margin,
+                path.rib_thickness,
+            );
+            let end_x = rib_endpoint_x(
+                &station,
+                path.end_edge,
+                path.flange_margin,
+                path.rib_thickness,
+            );
+            surface_point(spec, &station, lerp(start_x, end_x, t), path.surface)
+        })
+        .collect()
+}
+
+pub fn interpolate_station(spec: &WingSpec, span: f64) -> Result<WingStation, WingError> {
+    for pair in spec.stations.windows(2) {
+        let a = pair[0];
+        let b = pair[1];
+        if span >= a.span && span <= b.span {
+            let t = (span - a.span) / (b.span - a.span);
+            return Ok(WingStation {
+                span,
+                chord: lerp(a.chord, b.chord, t),
+                x_offset: lerp(a.x_offset, b.x_offset, t),
+                z_offset: lerp(a.z_offset, b.z_offset, t),
+                twist_deg: lerp(a.twist_deg, b.twist_deg, t),
+            });
+        }
+    }
+    Err(WingError::Geometry(format!(
+        "span {span} is outside the wing"
+    )))
+}
+
+pub fn transform_station(station: &WingStation, x: f64, z: f64) -> [f64; 3] {
+    let pivot = station.chord * 0.25;
+    let angle = station.twist_deg.to_radians();
+    let dx = x - pivot;
+    [
+        pivot + dx * angle.cos() + z * angle.sin() + station.x_offset,
+        station.span,
+        -dx * angle.sin() + z * angle.cos() + station.z_offset,
+    ]
+}
+
+pub fn chord_region(
+    spec: &WingSpec,
+    z_min: f64,
+    z_max: f64,
+    chord_margin: f64,
+) -> Result<Manifold, WingError> {
+    let mut mesh = MeshGL64 {
+        num_prop: 3,
+        ..Default::default()
+    };
+    for station in &spec.stations {
+        for &(x, z) in &[
+            (-chord_margin, z_min),
+            (station.chord + chord_margin, z_min),
+            (station.chord + chord_margin, z_max),
+            (-chord_margin, z_max),
+        ] {
+            mesh.vert_properties
+                .extend(transform_station(station, x, z));
+        }
+    }
+    close_quad_loft(&mut mesh, spec.stations.len());
+    checked_mesh(mesh, "chord region")
+}
+
+pub fn registration_diamond(
+    spec: &WingSpec,
+    edge: WingEdge,
+    center_span: f64,
+    chord_half_width: f64,
+    span_half_width: f64,
+    normal_half_depth: f64,
+) -> Result<Manifold, WingError> {
+    let center = interpolate_station(spec, center_span)?;
+    let inboard = interpolate_station(spec, center_span - span_half_width)?;
+    let outboard = interpolate_station(spec, center_span + span_half_width)?;
+    let footprint = [
+        transform_station(
+            &center,
+            flange_center_x(&center, edge) - chord_half_width,
+            0.0,
+        ),
+        transform_station(&inboard, flange_center_x(&inboard, edge), 0.0),
+        transform_station(
+            &center,
+            flange_center_x(&center, edge) + chord_half_width,
+            0.0,
+        ),
+        transform_station(&outboard, flange_center_x(&outboard, edge), 0.0),
+    ];
+    let normal = flange_normal(spec, edge, center_span)?;
+    let base = footprint.map(|point| add_scaled(point, normal, -normal_half_depth));
+    let top = footprint.map(|point| add_scaled(point, normal, normal_half_depth));
+    let mut mesh = MeshGL64 {
+        num_prop: 3,
+        ..Default::default()
+    };
+    for point in base.into_iter().chain(top) {
+        mesh.vert_properties.extend(point);
+    }
+    connect_quad_rings(&mut mesh, 0, 4);
+    mesh.tri_verts.extend([0, 2, 1, 0, 3, 2]);
+    mesh.tri_verts.extend([4, 5, 6, 4, 6, 7]);
+    checked_mesh(mesh, "registration diamond")
+}
+
+fn surface_point(
+    spec: &WingSpec,
+    station: &WingStation,
+    x: f64,
+    surface: WingSurface,
+) -> Result<[f64; 3], WingError> {
+    if x <= 0.0 || x >= station.chord {
+        return Ok(transform_station(station, x, 0.0));
+    }
+    let normalized_x = x / station.chord;
+    let trailing = if spec.closed_trailing_edge {
+        -0.1036
+    } else {
+        -0.1015
+    };
+    let thickness = 5.0
+        * spec.airfoil.thickness
+        * (0.2969 * normalized_x.sqrt() - 0.1260 * normalized_x - 0.3516 * normalized_x.powi(2)
+            + 0.2843 * normalized_x.powi(3)
+            + trailing * normalized_x.powi(4));
+    let (camber, _) = camber(spec.airfoil, normalized_x);
+    let signed_thickness = match surface {
+        WingSurface::Lower => -thickness,
+        WingSurface::Upper => thickness,
+    };
+    Ok(transform_station(
+        station,
+        x,
+        (camber + signed_thickness) * station.chord,
+    ))
+}
+
+fn rib_endpoint_x(
+    station: &WingStation,
+    edge: WingEdge,
+    flange_margin: f64,
+    thickness: f64,
+) -> f64 {
+    let half = thickness * 0.5;
+    match edge {
+        WingEdge::Leading => -flange_margin + half,
+        WingEdge::Trailing => station.chord + flange_margin - half,
+    }
+}
+
+fn station_axis(a: WingStation, b: WingStation) -> [f64; 3] {
+    normalize_array([
+        b.x_offset - a.x_offset,
+        b.span - a.span,
+        b.z_offset - a.z_offset,
+    ])
+    .expect("stations have strictly increasing spans")
+}
+
+fn lerp(a: f64, b: f64, t: f64) -> f64 {
+    a + (b - a) * t
+}
+
+fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn subtract(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn cross_array(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn normalize_array(vector: [f64; 3]) -> Option<[f64; 3]> {
+    let length = dot(vector, vector).sqrt();
+    (length > f64::EPSILON).then(|| [vector[0] / length, vector[1] / length, vector[2] / length])
+}
+
+fn flange_center_x(station: &WingStation, edge: WingEdge) -> f64 {
+    match edge {
+        WingEdge::Leading => -6.0,
+        WingEdge::Trailing => station.chord + 6.0,
+    }
+}
+
+fn flange_normal(spec: &WingSpec, edge: WingEdge, span: f64) -> Result<[f64; 3], WingError> {
+    let center = interpolate_station(spec, span)?;
+    let inboard = interpolate_station(spec, span - 1.0)?;
+    let outboard = interpolate_station(spec, span + 1.0)?;
+    let center_x = flange_center_x(&center, edge);
+    let chord_tangent = subtract(
+        transform_station(&center, center_x + 1.0, 0.0),
+        transform_station(&center, center_x - 1.0, 0.0),
+    );
+    let span_tangent = subtract(
+        transform_station(&outboard, flange_center_x(&outboard, edge), 0.0),
+        transform_station(&inboard, flange_center_x(&inboard, edge), 0.0),
+    );
+    let mut normal = normalize_array(cross_array(chord_tangent, span_tangent))
+        .ok_or(WingError::InvalidSpec("cannot determine flange normal"))?;
+    if normal[2] < 0.0 {
+        normal = [-normal[0], -normal[1], -normal[2]];
+    }
+    Ok(normal)
+}
+
+fn add_scaled(point: [f64; 3], direction: [f64; 3], scale: f64) -> [f64; 3] {
+    [
+        point[0] + direction[0] * scale,
+        point[1] + direction[1] * scale,
+        point[2] + direction[2] * scale,
+    ]
+}
+
+fn connect_quad_rings(mesh: &mut MeshGL64, lower: u64, upper: u64) {
+    for index in 0..4_u64 {
+        let next = (index + 1) % 4;
+        mesh.tri_verts
+            .extend([lower + index, upper + next, upper + index]);
+        mesh.tri_verts
+            .extend([lower + index, lower + next, upper + next]);
+    }
+}
+
+fn close_quad_loft(mesh: &mut MeshGL64, stations: usize) {
+    for station in 0..stations - 1 {
+        let a = (station * 4) as u64;
+        let b = ((station + 1) * 4) as u64;
+        for index in 0..4_u64 {
+            let next = (index + 1) % 4;
+            mesh.tri_verts.extend([a + index, b + index, b + next]);
+            mesh.tri_verts.extend([a + index, b + next, a + next]);
+        }
+    }
+    mesh.tri_verts.extend([0, 1, 2, 0, 2, 3]);
+    let end = ((stations - 1) * 4) as u64;
+    mesh.tri_verts
+        .extend([end, end + 2, end + 1, end, end + 3, end + 2]);
+}
+
+fn checked_mesh(mesh: MeshGL64, label: &str) -> Result<Manifold, WingError> {
+    let solid = Manifold::from_mesh_gl64(&mesh);
+    if solid.status().to_str() != "No Error" {
+        return Err(WingError::Geometry(format!(
+            "invalid {label}: {}",
+            solid.status()
+        )));
+    }
+    Ok(solid)
+}
+
 #[derive(Debug)]
 pub enum WingError {
     InvalidAirfoil(String),
@@ -308,5 +701,73 @@ mod tests {
         let n = Naca4::parse("0012").unwrap();
         assert_eq!(n.max_camber, 0.0);
         assert_eq!(n.thickness, 0.12);
+    }
+
+    #[test]
+    fn gull_segments_break_at_the_largest_axial_deviation() {
+        let spec = preset("gull").unwrap();
+        let ranges = deviation_aware_segment_ranges(&spec, 2, -3.0, 363.0).unwrap();
+
+        assert_eq!(ranges, vec![(-3.0, 180.0), (180.0, 363.0)]);
+    }
+
+    #[test]
+    fn segment_normal_tracks_the_wing_and_points_upward() {
+        let spec = preset("gull").unwrap();
+        let normal = segment_normal(&spec, 0.0, 180.0).unwrap();
+        let length = normal
+            .iter()
+            .map(|component| component.powi(2))
+            .sum::<f64>()
+            .sqrt();
+
+        assert!((length - 1.0).abs() < 1.0e-12);
+        assert!(normal[2] > 0.0);
+        assert!(normal[1].abs() > 0.05);
+    }
+
+    #[test]
+    fn sampled_rib_paths_follow_each_airfoil_surface_to_the_flange_edges() {
+        let spec = preset("gull").unwrap();
+        let lower_spec = RibPathSpec {
+            start_edge: WingEdge::Leading,
+            start_span: 40.0,
+            end_edge: WingEdge::Trailing,
+            end_span: 140.0,
+            flange_margin: 12.0,
+            rib_thickness: 1.35,
+            samples: 24,
+            surface: WingSurface::Lower,
+        };
+        let lower = sample_rib_surface_path(&spec, lower_spec).unwrap();
+        let upper = sample_rib_surface_path(
+            &spec,
+            RibPathSpec {
+                surface: WingSurface::Upper,
+                ..lower_spec
+            },
+        )
+        .unwrap();
+
+        assert_eq!(lower.len(), 25);
+        assert_eq!(upper.len(), 25);
+        assert!(upper[12][2] > lower[12][2]);
+        assert!(lower[0][0] < 0.0);
+        assert!(lower[24][0] > spec.stations[1].chord);
+    }
+
+    #[test]
+    fn gull_chord_regions_are_closed_manifolds() {
+        let spec = preset("gull").unwrap();
+
+        for region in [
+            chord_region(&spec, -500.0, 0.0, 80.0).unwrap(),
+            chord_region(&spec, 0.0, 500.0, 80.0).unwrap(),
+            chord_region(&spec, -3.0, 0.0, 12.0).unwrap(),
+            chord_region(&spec, 0.0, 3.0, 12.0).unwrap(),
+        ] {
+            assert!(!region.is_empty());
+            assert!(region.volume() > 0.0);
+        }
     }
 }

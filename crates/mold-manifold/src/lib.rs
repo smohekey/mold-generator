@@ -32,6 +32,7 @@ pub enum ManifoldKernelError {
     Geometry(ManifoldError),
     InvalidBounds(Bounds3),
     InvalidOffset(f64),
+    InvalidSweep(&'static str),
     NonAffineTransform,
 }
 
@@ -47,6 +48,7 @@ impl fmt::Display for ManifoldKernelError {
                     "offset distance must be finite and greater than zero: {distance}"
                 )
             }
+            Self::InvalidSweep(message) => write!(f, "invalid swept rib: {message}"),
             Self::NonAffineTransform => write!(f, "transform must be affine"),
         }
     }
@@ -130,6 +132,51 @@ impl ManifoldKernel {
         let mut writer = BufWriter::new(file);
         stl_io::write_stl(&mut writer, triangles.iter())?;
         Ok(())
+    }
+
+    pub fn swept_rib(
+        &self,
+        surface_path: &[[f64; 3]],
+        direction: [f64; 3],
+        thickness: f64,
+        depth: f64,
+    ) -> Result<ManifoldSolid, ManifoldKernelError> {
+        if surface_path.len() < 2 || thickness <= 0.0 || depth <= 0.0 {
+            return Err(ManifoldKernelError::InvalidSweep(
+                "requires at least two points and positive thickness/depth",
+            ));
+        }
+        let direction = normalize_array(direction).ok_or(ManifoldKernelError::InvalidSweep(
+            "direction must be non-zero",
+        ))?;
+        let half = thickness * 0.5;
+        let mut mesh = MeshGL64 {
+            num_prop: 3,
+            ..Default::default()
+        };
+        for (index, &center) in surface_path.iter().enumerate() {
+            let before = surface_path[index.saturating_sub(1)];
+            let after = surface_path[(index + 1).min(surface_path.len() - 1)];
+            let tangent = subtract_array(after, before);
+            let side = normalize_array(cross_array(direction, tangent)).ok_or(
+                ManifoldKernelError::InvalidSweep("path tangent is parallel to direction"),
+            )?;
+            let surface_left = add_scaled_array(center, side, -half);
+            let surface_right = add_scaled_array(center, side, half);
+            let outer_left = add_scaled_array(surface_left, direction, depth);
+            let outer_right = add_scaled_array(surface_right, direction, depth);
+            for point in [surface_left, surface_right, outer_right, outer_left] {
+                mesh.vert_properties.extend(point);
+            }
+        }
+        for index in 0..surface_path.len() - 1 {
+            connect_quad_rings(&mut mesh, (index * 4) as u64, ((index + 1) * 4) as u64);
+        }
+        mesh.tri_verts.extend([0, 2, 1, 0, 3, 2]);
+        let end = ((surface_path.len() - 1) * 4) as u64;
+        mesh.tri_verts
+            .extend([end, end + 1, end + 2, end, end + 2, end + 3]);
+        self.checked(Manifold::from_mesh_gl64(&mesh))
     }
 
     fn checked(&self, manifold: Manifold) -> Result<ManifoldSolid, ManifoldKernelError> {
@@ -272,5 +319,76 @@ fn triangle_normal(a: stl_io::Vertex, b: stl_io::Vertex, c: stl_io::Vertex) -> s
         stl_io::Normal::new([normal[0] / length, normal[1] / length, normal[2] / length])
     } else {
         stl_io::Normal::new([0.0, 0.0, 0.0])
+    }
+}
+
+fn connect_quad_rings(mesh: &mut MeshGL64, lower: u64, upper: u64) {
+    for index in 0..4_u64 {
+        let next = (index + 1) % 4;
+        mesh.tri_verts
+            .extend([lower + index, upper + next, upper + index]);
+        mesh.tri_verts
+            .extend([lower + index, lower + next, upper + next]);
+    }
+}
+
+fn add_scaled_array(point: [f64; 3], direction: [f64; 3], scale: f64) -> [f64; 3] {
+    [
+        point[0] + direction[0] * scale,
+        point[1] + direction[1] * scale,
+        point[2] + direction[2] * scale,
+    ]
+}
+
+fn subtract_array(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn cross_array(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn normalize_array(vector: [f64; 3]) -> Option<[f64; 3]> {
+    let length = (vector[0].powi(2) + vector[1].powi(2) + vector[2].powi(2)).sqrt();
+    (length > f64::EPSILON).then(|| [vector[0] / length, vector[1] / length, vector[2] / length])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn swept_rib_builds_a_closed_solid_along_a_curved_path() {
+        let kernel = ManifoldKernel;
+        let rib = kernel
+            .swept_rib(
+                &[[0.0, 0.0, 0.0], [5.0, 10.0, 1.0], [12.0, 20.0, 3.0]],
+                [0.0, 0.0, 1.0],
+                1.35,
+                8.0,
+            )
+            .unwrap();
+
+        assert_eq!(rib.0.status(), ManifoldError::NoError);
+        assert!(!rib.0.is_empty());
+        assert!(rib.0.volume() > 0.0);
+    }
+
+    #[test]
+    fn swept_rib_rejects_a_zero_direction() {
+        let error = ManifoldKernel
+            .swept_rib(
+                &[[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]],
+                [0.0, 0.0, 0.0],
+                1.35,
+                8.0,
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, ManifoldKernelError::InvalidSweep(_)));
     }
 }
