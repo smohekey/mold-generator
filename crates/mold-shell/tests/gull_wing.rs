@@ -3,8 +3,13 @@ use std::num::NonZeroUsize;
 use mold_core::Axis;
 use mold_geometry::{SolidKernel, Vec3};
 use mold_manifold::{ManifoldKernel, ManifoldSolid};
-use mold_shell::{ShellSettings, generate_sectioned_shell_mold};
-use mold_test_models::{generate, preset};
+use mold_shell::{
+    PrintVolume, SegmentBoundary, SegmentationSettings, ShellSettings,
+    generate_sectioned_shell_mold, partition_for_print_volume,
+};
+use mold_test_models::{
+    PrintableEnvelope, generate, preset, printable_segment_dimensions, wing_segment_boundaries,
+};
 
 #[test]
 fn gull_wing_generates_valid_sectioned_shell_mold() {
@@ -88,4 +93,58 @@ fn extrusion_width_controls_structural_web_thickness() {
         ..Default::default()
     };
     assert!((settings.thickness() - 1.44).abs() < 1.0e-9);
+}
+
+#[test]
+fn print_volume_constrains_gull_wing_segmentation_and_preserves_the_bend() {
+    let spec = preset("gull").unwrap();
+    let candidates = wing_segment_boundaries(&spec, -3.0, 603.0, 25.0).unwrap();
+    let boundaries: Vec<SegmentBoundary> = candidates
+        .iter()
+        .map(|candidate| SegmentBoundary {
+            position: candidate.position,
+            preference: candidate.deviation,
+        })
+        .collect();
+    let envelope = PrintableEnvelope {
+        flange_margin: 12.0,
+        shell_thickness: 3.0,
+        web_depth: 8.0,
+        span_samples: 24,
+    };
+    let partition = |height| {
+        partition_for_print_volume(
+            &boundaries,
+            SegmentationSettings {
+                print_volume: PrintVolume {
+                    width: 320.0,
+                    depth: 320.0,
+                    height,
+                    clearance: 5.0,
+                },
+                preferred_segment_count: None,
+                max_segment_count: 8,
+            },
+            |start, end| printable_segment_dimensions(&spec, start, end, envelope).ok(),
+        )
+        .unwrap()
+    };
+
+    let tall_printer = partition(500.0);
+    let short_printer = partition(300.0);
+
+    assert_eq!(tall_printer, vec![(-3.0, 180.0), (180.0, 603.0)]);
+    assert!(short_printer.len() > tall_printer.len());
+    for range in short_printer {
+        let dimensions = printable_segment_dimensions(&spec, range.0, range.1, envelope).unwrap();
+        assert!(
+            PrintVolume {
+                width: 320.0,
+                depth: 320.0,
+                height: 300.0,
+                clearance: 5.0,
+            }
+            .fits(dimensions)
+        );
+    }
 }

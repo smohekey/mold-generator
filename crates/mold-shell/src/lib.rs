@@ -36,6 +36,185 @@ impl Default for WebbingSettings {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PrintVolume {
+    pub width: f64,
+    pub depth: f64,
+    pub height: f64,
+    pub clearance: f64,
+}
+
+impl PrintVolume {
+    pub fn usable_dimensions(self) -> Option<[f64; 3]> {
+        let margin = self.clearance * 2.0;
+        let dimensions = [
+            self.width - margin,
+            self.depth - margin,
+            self.height - margin,
+        ];
+        dimensions
+            .iter()
+            .all(|value| value.is_finite() && *value > 0.0)
+            .then_some(dimensions)
+    }
+
+    /// Tests a segment aligned to printer height. Rotation by 90 degrees on
+    /// the print bed is permitted, so width and depth may be exchanged.
+    pub fn fits(self, segment_dimensions: [f64; 3]) -> bool {
+        let Some([width, depth, height]) = self.usable_dimensions() else {
+            return false;
+        };
+        if !segment_dimensions
+            .iter()
+            .all(|value| value.is_finite() && *value > 0.0)
+        {
+            return false;
+        }
+        let [segment_width, segment_depth, segment_height] = segment_dimensions;
+        segment_height <= height
+            && ((segment_width <= width && segment_depth <= depth)
+                || (segment_width <= depth && segment_depth <= width))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SegmentationSettings {
+    pub print_volume: PrintVolume,
+    pub preferred_segment_count: Option<usize>,
+    pub max_segment_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SegmentBoundary {
+    pub position: f64,
+    /// Higher values make this a more desirable internal boundary.
+    pub preference: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SegmentationError {
+    InvalidSettings(&'static str),
+    NoPrintablePartition,
+}
+
+impl std::fmt::Display for SegmentationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidSettings(message) => {
+                write!(formatter, "invalid segmentation settings: {message}")
+            }
+            Self::NoPrintablePartition => {
+                write!(formatter, "no partition fits the configured print volume")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SegmentationError {}
+
+/// Finds the smallest printable partition, preferring requested segment count
+/// and high-value boundaries (for example, axial bends) when alternatives fit.
+pub fn partition_for_print_volume<F>(
+    boundaries: &[SegmentBoundary],
+    settings: SegmentationSettings,
+    mut dimensions: F,
+) -> Result<Vec<(f64, f64)>, SegmentationError>
+where
+    F: FnMut(f64, f64) -> Option<[f64; 3]>,
+{
+    if boundaries.len() < 2 {
+        return Err(SegmentationError::InvalidSettings(
+            "at least two boundaries are required",
+        ));
+    }
+    if settings.max_segment_count == 0 || settings.print_volume.usable_dimensions().is_none() {
+        return Err(SegmentationError::InvalidSettings(
+            "print volume and maximum segment count must be positive",
+        ));
+    }
+    if settings
+        .preferred_segment_count
+        .is_some_and(|count| count == 0 || count > settings.max_segment_count)
+    {
+        return Err(SegmentationError::InvalidSettings(
+            "preferred segment count must be within the configured maximum",
+        ));
+    }
+    if boundaries
+        .windows(2)
+        .any(|pair| pair[1].position <= pair[0].position)
+    {
+        return Err(SegmentationError::InvalidSettings(
+            "boundaries must be strictly increasing",
+        ));
+    }
+
+    let count = boundaries.len();
+    let mut fits = vec![vec![false; count]; count];
+    for start in 0..count - 1 {
+        for end in start + 1..count {
+            fits[start][end] = dimensions(boundaries[start].position, boundaries[end].position)
+                .is_some_and(|size| settings.print_volume.fits(size));
+        }
+    }
+
+    let preferred = settings.preferred_segment_count.unwrap_or(1).max(1);
+    let first_count = preferred.min(settings.max_segment_count);
+    let counts = (first_count..=settings.max_segment_count).chain(1..first_count);
+    for segment_count in counts {
+        if let Some(indices) = best_partition(&fits, boundaries, segment_count) {
+            return Ok(indices
+                .windows(2)
+                .map(|pair| (boundaries[pair[0]].position, boundaries[pair[1]].position))
+                .collect());
+        }
+    }
+    Err(SegmentationError::NoPrintablePartition)
+}
+
+fn best_partition(
+    fits: &[Vec<bool>],
+    boundaries: &[SegmentBoundary],
+    segment_count: usize,
+) -> Option<Vec<usize>> {
+    let end = boundaries.len() - 1;
+    let mut scores = vec![vec![None; boundaries.len()]; segment_count + 1];
+    scores[0][0] = Some((0.0_f64, Vec::<usize>::new()));
+    for used in 0..segment_count {
+        for (start, fit_from_start) in fits.iter().enumerate().take(end) {
+            let Some((score, cuts)) = scores[used][start].clone() else {
+                continue;
+            };
+            for (next, boundary) in boundaries.iter().enumerate().take(end + 1).skip(start + 1) {
+                if !fit_from_start[next] {
+                    continue;
+                }
+                let boundary_score = if next == end {
+                    0.0
+                } else {
+                    boundary.preference
+                };
+                let candidate_score = score + boundary_score;
+                let entry = &mut scores[used + 1][next];
+                if entry
+                    .as_ref()
+                    .is_none_or(|(existing, _)| candidate_score > *existing)
+                {
+                    let mut candidate_cuts = cuts.clone();
+                    candidate_cuts.push(next);
+                    *entry = Some((candidate_score, candidate_cuts));
+                }
+            }
+        }
+    }
+    scores[segment_count][end].take().map(|(_, cuts)| {
+        let mut indices = Vec::with_capacity(cuts.len() + 1);
+        indices.push(0);
+        indices.extend(cuts);
+        indices
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FlangeDivisionSettings {
     pub fixture_span: f64,
     pub max_spacing_ratio: f64,
@@ -813,6 +992,88 @@ mod tests {
         assert_eq!(layouts[1].end.edge, FlangeEdge::Leading);
         assert_eq!(layouts[1].start.span, 110.0);
         assert_eq!(layouts[1].end.span, 170.0);
+    }
+
+    #[test]
+    fn print_volume_allows_rotating_a_segment_on_the_bed() {
+        let volume = PrintVolume {
+            width: 220.0,
+            depth: 160.0,
+            height: 250.0,
+            clearance: 5.0,
+        };
+
+        assert!(volume.fits([145.0, 205.0, 230.0]));
+        assert!(!volume.fits([155.0, 215.0, 230.0]));
+        assert!(!volume.fits([145.0, 205.0, 245.0]));
+    }
+
+    #[test]
+    fn partitioner_adds_sections_to_satisfy_printer_height() {
+        let boundaries = [
+            SegmentBoundary {
+                position: 0.0,
+                preference: 0.0,
+            },
+            SegmentBoundary {
+                position: 100.0,
+                preference: 10.0,
+            },
+            SegmentBoundary {
+                position: 200.0,
+                preference: 1.0,
+            },
+            SegmentBoundary {
+                position: 300.0,
+                preference: 0.0,
+            },
+        ];
+        let settings = SegmentationSettings {
+            print_volume: PrintVolume {
+                width: 250.0,
+                depth: 250.0,
+                height: 220.0,
+                clearance: 5.0,
+            },
+            preferred_segment_count: None,
+            max_segment_count: 3,
+        };
+
+        let ranges = partition_for_print_volume(&boundaries, settings, |start, end| {
+            Some([100.0, 50.0, end - start])
+        })
+        .unwrap();
+
+        assert_eq!(ranges, vec![(0.0, 100.0), (100.0, 300.0)]);
+    }
+
+    #[test]
+    fn partitioner_reports_when_even_smallest_sections_do_not_fit() {
+        let boundaries = [
+            SegmentBoundary {
+                position: 0.0,
+                preference: 0.0,
+            },
+            SegmentBoundary {
+                position: 100.0,
+                preference: 0.0,
+            },
+        ];
+        let settings = SegmentationSettings {
+            print_volume: PrintVolume {
+                width: 50.0,
+                depth: 50.0,
+                height: 50.0,
+                clearance: 0.0,
+            },
+            preferred_segment_count: None,
+            max_segment_count: 1,
+        };
+
+        let result =
+            partition_for_print_volume(&boundaries, settings, |_, _| Some([100.0, 100.0, 100.0]));
+
+        assert_eq!(result, Err(SegmentationError::NoPrintablePartition));
     }
 
     #[test]

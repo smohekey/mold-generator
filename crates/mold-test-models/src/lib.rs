@@ -64,6 +64,197 @@ pub struct RibPathSpec {
     pub surface: WingSurface,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WingSegmentBoundary {
+    pub position: f64,
+    pub deviation: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PrintableEnvelope {
+    pub flange_margin: f64,
+    pub shell_thickness: f64,
+    pub web_depth: f64,
+    pub span_samples: usize,
+}
+
+pub fn wing_segment_boundaries(
+    spec: &WingSpec,
+    outer_min: f64,
+    outer_max: f64,
+    maximum_step: f64,
+) -> Result<Vec<WingSegmentBoundary>, WingError> {
+    if maximum_step <= 0.0 || outer_max <= outer_min {
+        return Err(WingError::InvalidSpec(
+            "segment candidate step and span must be positive",
+        ));
+    }
+    let mut boundaries = vec![WingSegmentBoundary {
+        position: outer_min,
+        deviation: 0.0,
+    }];
+    let step_count = ((outer_max - outer_min) / maximum_step).ceil() as usize;
+    for index in 1..step_count {
+        boundaries.push(WingSegmentBoundary {
+            position: lerp(outer_min, outer_max, index as f64 / step_count as f64),
+            deviation: 0.0,
+        });
+    }
+    for boundary in axial_deviations(spec) {
+        if boundary.position > outer_min && boundary.position < outer_max {
+            boundaries.push(boundary);
+        }
+    }
+    boundaries.push(WingSegmentBoundary {
+        position: outer_max,
+        deviation: 0.0,
+    });
+    boundaries.sort_by(|a, b| a.position.total_cmp(&b.position));
+    let mut unique: Vec<WingSegmentBoundary> = Vec::with_capacity(boundaries.len());
+    for boundary in boundaries {
+        if let Some(previous) = unique.last_mut()
+            && (previous.position - boundary.position).abs() < 1.0e-6
+        {
+            previous.deviation = previous.deviation.max(boundary.deviation);
+        } else {
+            unique.push(boundary);
+        }
+    }
+    Ok(unique)
+}
+
+pub fn printable_segment_dimensions(
+    spec: &WingSpec,
+    start_span: f64,
+    end_span: f64,
+    envelope: PrintableEnvelope,
+) -> Result<[f64; 3], WingError> {
+    if envelope.span_samples == 0 || end_span <= start_span {
+        return Err(WingError::InvalidSpec(
+            "printable envelope needs samples and a positive span",
+        ));
+    }
+    if envelope.flange_margin < 0.0 || envelope.shell_thickness < 0.0 || envelope.web_depth < 0.0 {
+        return Err(WingError::InvalidSpec(
+            "printable envelope allowances cannot be negative",
+        ));
+    }
+    let model_start = spec
+        .stations
+        .first()
+        .ok_or(WingError::InvalidSpec("wing has no stations"))?
+        .span;
+    let model_end = spec
+        .stations
+        .last()
+        .ok_or(WingError::InvalidSpec("wing has no stations"))?
+        .span;
+    let clamped_start = start_span.clamp(model_start, model_end);
+    let clamped_end = end_span.clamp(model_start, model_end);
+    if clamped_end <= clamped_start {
+        return Err(WingError::InvalidSpec("segment lies outside the wing"));
+    }
+    let start = interpolate_station(spec, clamped_start)?;
+    let end = interpolate_station(spec, clamped_end)?;
+    let center = interpolate_station(spec, (clamped_start + clamped_end) * 0.5)?;
+    let vertical = normalize_array(subtract(
+        transform_station(&end, end.chord * 0.25, 0.0),
+        transform_station(&start, start.chord * 0.25, 0.0),
+    ))
+    .ok_or(WingError::InvalidSpec("cannot determine print axis"))?;
+    let chord = subtract(
+        transform_station(&center, center.chord, 0.0),
+        transform_station(&center, 0.0, 0.0),
+    );
+    let width = normalize_array(subtract(chord, scale(vertical, dot(chord, vertical))))
+        .ok_or(WingError::InvalidSpec("cannot determine print width axis"))?;
+    let depth = normalize_array(cross_array(vertical, width))
+        .ok_or(WingError::InvalidSpec("cannot determine print depth axis"))?;
+    let outward = envelope.shell_thickness + envelope.web_depth;
+    let mut lower = ProjectionBounds::default();
+    let mut upper = ProjectionBounds::default();
+    for index in 0..=envelope.span_samples {
+        let span = lerp(
+            clamped_start,
+            clamped_end,
+            index as f64 / envelope.span_samples as f64,
+        );
+        let station = interpolate_station(spec, span)?;
+        let profile_samples = spec.profile_points.max(8);
+        for chord_index in 0..=profile_samples {
+            let x = station.chord * chord_index as f64 / profile_samples as f64;
+            let lower_surface = surface_point(spec, &station, x, WingSurface::Lower)?;
+            let upper_surface = surface_point(spec, &station, x, WingSurface::Upper)?;
+            lower.include(lower_surface, width, depth, vertical);
+            lower.include(
+                add_scaled(lower_surface, depth, outward),
+                width,
+                depth,
+                vertical,
+            );
+            upper.include(upper_surface, width, depth, vertical);
+            upper.include(
+                add_scaled(upper_surface, depth, -outward),
+                width,
+                depth,
+                vertical,
+            );
+        }
+        for x in [
+            -envelope.flange_margin,
+            station.chord + envelope.flange_margin,
+        ] {
+            let flange = transform_station(&station, x, 0.0);
+            for bounds in [&mut lower, &mut upper] {
+                bounds.include(flange, width, depth, vertical);
+            }
+            lower.include(add_scaled(flange, depth, outward), width, depth, vertical);
+            upper.include(add_scaled(flange, depth, -outward), width, depth, vertical);
+        }
+    }
+    let lower = lower.dimensions();
+    let upper = upper.dimensions();
+    let clipping_overhang = (clamped_start - start_span) + (end_span - clamped_end);
+    Ok([
+        lower[0].max(upper[0]),
+        lower[1].max(upper[1]),
+        lower[2].max(upper[2]) + clipping_overhang,
+    ])
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProjectionBounds {
+    min: [f64; 3],
+    max: [f64; 3],
+}
+
+impl Default for ProjectionBounds {
+    fn default() -> Self {
+        Self {
+            min: [f64::INFINITY; 3],
+            max: [f64::NEG_INFINITY; 3],
+        }
+    }
+}
+
+impl ProjectionBounds {
+    fn include(&mut self, point: [f64; 3], width: [f64; 3], depth: [f64; 3], height: [f64; 3]) {
+        let projected = [dot(point, width), dot(point, depth), dot(point, height)];
+        for (index, value) in projected.into_iter().enumerate() {
+            self.min[index] = self.min[index].min(value);
+            self.max[index] = self.max[index].max(value);
+        }
+    }
+
+    fn dimensions(self) -> [f64; 3] {
+        [
+            self.max[0] - self.min[0],
+            self.max[1] - self.min[1],
+            self.max[2] - self.min[2],
+        ]
+    }
+}
+
 pub fn deviation_aware_segment_ranges(
     spec: &WingSpec,
     segment_count: usize,
@@ -83,17 +274,9 @@ pub fn deviation_aware_segment_ranges(
         .last()
         .ok_or(WingError::InvalidSpec("wing has no stations"))?
         .span;
-    let mut candidates: Vec<(f64, f64)> = spec
-        .stations
-        .windows(3)
-        .map(|stations| {
-            let incoming = station_axis(stations[0], stations[1]);
-            let outgoing = station_axis(stations[1], stations[2]);
-            (
-                stations[1].span,
-                dot(incoming, outgoing).clamp(-1.0, 1.0).acos(),
-            )
-        })
+    let mut candidates: Vec<(f64, f64)> = axial_deviations(spec)
+        .into_iter()
+        .map(|boundary| (boundary.position, boundary.deviation))
         .collect();
     candidates.sort_by(|a, b| b.1.total_cmp(&a.1));
     let mut boundaries: Vec<f64> = candidates
@@ -335,6 +518,20 @@ fn station_axis(a: WingStation, b: WingStation) -> [f64; 3] {
     .expect("stations have strictly increasing spans")
 }
 
+fn axial_deviations(spec: &WingSpec) -> Vec<WingSegmentBoundary> {
+    spec.stations
+        .windows(3)
+        .map(|stations| {
+            let incoming = station_axis(stations[0], stations[1]);
+            let outgoing = station_axis(stations[1], stations[2]);
+            WingSegmentBoundary {
+                position: stations[1].span,
+                deviation: dot(incoming, outgoing).clamp(-1.0, 1.0).acos(),
+            }
+        })
+        .collect()
+}
+
 fn lerp(a: f64, b: f64, t: f64) -> f64 {
     a + (b - a) * t
 }
@@ -345,6 +542,10 @@ fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
 
 fn subtract(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn scale(vector: [f64; 3], factor: f64) -> [f64; 3] {
+    [vector[0] * factor, vector[1] * factor, vector[2] * factor]
 }
 
 fn cross_array(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
@@ -709,6 +910,39 @@ mod tests {
         let ranges = deviation_aware_segment_ranges(&spec, 2, -3.0, 363.0).unwrap();
 
         assert_eq!(ranges, vec![(-3.0, 180.0), (180.0, 363.0)]);
+    }
+
+    #[test]
+    fn print_candidates_preserve_the_gull_bend_among_regular_fit_samples() {
+        let spec = preset("gull").unwrap();
+        let boundaries = wing_segment_boundaries(&spec, -3.0, 603.0, 25.0).unwrap();
+        let bend = boundaries
+            .iter()
+            .find(|boundary| (boundary.position - 180.0).abs() < 1.0e-9)
+            .unwrap();
+
+        assert!(bend.deviation > 0.1);
+        assert_eq!(boundaries.first().unwrap().position, -3.0);
+        assert_eq!(boundaries.last().unwrap().position, 603.0);
+    }
+
+    #[test]
+    fn printable_dimensions_include_flanges_backing_and_axial_deviation() {
+        let spec = preset("gull").unwrap();
+        let envelope = PrintableEnvelope {
+            flange_margin: 12.0,
+            shell_thickness: 3.0,
+            web_depth: 8.0,
+            span_samples: 24,
+        };
+        let full = printable_segment_dimensions(&spec, -3.0, 603.0, envelope).unwrap();
+        let inboard = printable_segment_dimensions(&spec, -3.0, 180.0, envelope).unwrap();
+        let outboard = printable_segment_dimensions(&spec, 180.0, 603.0, envelope).unwrap();
+
+        assert!(full[0] >= 264.0);
+        assert!(full[1] > 11.0);
+        assert!(full[2] > inboard[2]);
+        assert!(full[2] > outboard[2]);
     }
 
     #[test]

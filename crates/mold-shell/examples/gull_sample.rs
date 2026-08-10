@@ -5,18 +5,20 @@ use mold_core::{Axis, SectionedTwoPartMold};
 use mold_geometry::SolidKernel;
 use mold_manifold::{ManifoldKernel, ManifoldSolid};
 use mold_shell::{
-    FlangeDivisionSettings, FlangeEdge, PartingRegions, ShellSettings, WebbingSettings,
-    alternating_rib_layouts, attach_structural_webbing, divide_flange,
-    generate_sectioned_shell_mold_with_parting_ranges,
+    FlangeDivisionSettings, FlangeEdge, PartingRegions, PrintVolume, SegmentBoundary,
+    SegmentationSettings, ShellSettings, WebbingSettings, alternating_rib_layouts,
+    attach_structural_webbing, divide_flange, generate_sectioned_shell_mold_with_parting_ranges,
+    partition_for_print_volume,
 };
 use mold_test_models::{
-    RibPathSpec, WingEdge, WingSpec, WingSurface, chord_region, deviation_aware_segment_ranges,
-    registration_diamond, sample_rib_surface_path, segment_normal,
+    PrintableEnvelope, RibPathSpec, WingEdge, WingSpec, WingSurface, chord_region,
+    printable_segment_dimensions, registration_diamond, sample_rib_surface_path, segment_normal,
+    wing_segment_boundaries,
 };
 
-const SEGMENT_COUNT: usize = 2;
 const FLANGE_MARGIN: f64 = 12.0;
 const RIB_SAMPLES: usize = 24;
+const CANDIDATE_STEP: f64 = 25.0;
 
 #[derive(Debug, Clone, Copy)]
 struct FixtureSettings {
@@ -76,19 +78,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         structural_webbing: None,
         ..Default::default()
     };
+    let webbing = WebbingSettings::default();
     let expanded_bounds = kernel.bounds(&kernel.offset(&part, shell_settings.thickness)?)?;
-    let ranges = deviation_aware_segment_ranges(
+    let segmentation = SegmentationSettings {
+        print_volume: PrintVolume {
+            width: 320.0,
+            depth: 320.0,
+            height: 500.0,
+            clearance: 5.0,
+        },
+        preferred_segment_count: None,
+        max_segment_count: 8,
+    };
+    let candidates = wing_segment_boundaries(
         &spec,
-        SEGMENT_COUNT,
         expanded_bounds.min.y,
         expanded_bounds.max.y,
+        CANDIDATE_STEP,
     )?;
-    println!("deviation-aware segment ranges: {ranges:?}");
+    let envelope = PrintableEnvelope {
+        flange_margin: FLANGE_MARGIN,
+        shell_thickness: shell_settings.thickness,
+        web_depth: webbing.depth,
+        span_samples: 24,
+    };
+    let boundaries: Vec<SegmentBoundary> = candidates
+        .iter()
+        .map(|candidate| SegmentBoundary {
+            position: candidate.position,
+            preference: candidate.deviation,
+        })
+        .collect();
+    let ranges = partition_for_print_volume(&boundaries, segmentation, |start, end| {
+        printable_segment_dimensions(&spec, start, end, envelope).ok()
+    })?;
+    println!(
+        "print-volume-aware segment ranges for {:?}: {ranges:?}",
+        segmentation.print_volume
+    );
+    for (index, &(start, end)) in ranges.iter().enumerate() {
+        println!(
+            "segment {} print dimensions: {:?}",
+            index + 1,
+            printable_segment_dimensions(&spec, start, end, envelope)?
+        );
+    }
 
     let registration = RegistrationSettings::default();
     let inserts = build_registration_inserts(&spec, &ranges, registration)?;
     let socket_cutters: Vec<&ManifoldSolid> = inserts.iter().map(|insert| &insert.solid).collect();
-    let webbing = WebbingSettings::default();
     let (lower_ribs, upper_ribs) = build_ribs(&kernel, &spec, &ranges, registration, webbing)?;
 
     let baseline = generate_sectioned_shell_mold_with_parting_ranges(
