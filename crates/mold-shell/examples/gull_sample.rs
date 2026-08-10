@@ -3,6 +3,7 @@ use std::{fs, num::NonZeroUsize, path::Path};
 use manifold_rust::{manifold::Manifold, types::MeshGL64};
 use mold_3mf::{ThreeMfObject, write_3mf};
 use mold_core::Axis;
+use mold_geometry::SolidKernel;
 use mold_manifold::{ManifoldKernel, ManifoldSolid};
 use mold_shell::{PartingRegions, ShellSettings, generate_sectioned_shell_mold_with_parting};
 use mold_test_models::{WingSpec, WingStation};
@@ -17,28 +18,66 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let wing = mold_test_models::generate(&spec)?;
     mold_test_models::write_stl(&wing, output.join("gull-wing.stl"))?;
 
-    let lower_region = chord_region(&spec, -500.0, 0.0, 80.0)?;
-    let upper_region = chord_region(&spec, 0.0, 500.0, 80.0)?;
-    let lower_flange = chord_region(&spec, -3.0, 0.0, 12.0)?;
-    let upper_flange = chord_region(&spec, 0.0, 3.0, 12.0)?;
+    let lower_region = ManifoldSolid(chord_region(&spec, -500.0, 0.0, 80.0)?);
+    let upper_region = ManifoldSolid(chord_region(&spec, 0.0, 500.0, 80.0)?);
+    let lower_flange = ManifoldSolid(chord_region(&spec, -3.0, 0.0, 12.0)?);
+    let upper_flange = ManifoldSolid(chord_region(&spec, 0.0, 3.0, 12.0)?);
 
-    let key_a = diamond_key(&spec, FlangeSide::Leading, 95.0, 5.0, 7.0, 3.0)?;
-    let key_b = diamond_key(&spec, FlangeSide::Trailing, 410.0, 4.5, 6.0, 3.5)?;
-    let socket_a = diamond_key(&spec, FlangeSide::Leading, 95.0, 5.3, 7.3, 3.25)?;
-    let socket_b = diamond_key(&spec, FlangeSide::Trailing, 410.0, 4.8, 6.3, 3.75)?;
+    // The sockets are slightly larger than the standalone inserts. Both are
+    // centered on the parting surface and extruded along the actual local
+    // flange normal, derived from chord- and span-direction surface tangents.
+    let socket_a = ManifoldSolid(diamond_prism(
+        &spec,
+        FlangeSide::Leading,
+        95.0,
+        5.3,
+        7.3,
+        -2.25,
+        2.25,
+    )?);
+    let socket_b = ManifoldSolid(diamond_prism(
+        &spec,
+        FlangeSide::Trailing,
+        410.0,
+        4.8,
+        6.3,
+        -2.5,
+        2.5,
+    )?);
+    let insert_a = ManifoldSolid(diamond_prism(
+        &spec,
+        FlangeSide::Leading,
+        95.0,
+        5.0,
+        7.0,
+        -2.0,
+        2.0,
+    )?);
+    let insert_b = ManifoldSolid(diamond_prism(
+        &spec,
+        FlangeSide::Trailing,
+        410.0,
+        4.5,
+        6.0,
+        -2.25,
+        2.25,
+    )?);
 
     let kernel = ManifoldKernel;
     let part = ManifoldSolid(wing);
-    let lower_region = ManifoldSolid(lower_region);
-    let upper_region = ManifoldSolid(upper_region);
-    let lower_flange = ManifoldSolid(lower_flange);
-    let upper_flange = ManifoldSolid(upper_flange);
-    let key_a = ManifoldSolid(key_a);
-    let key_b = ManifoldSolid(key_b);
-    let socket_a = ManifoldSolid(socket_a);
-    let socket_b = ManifoldSolid(socket_b);
-    let keys = [&key_a, &key_b];
-    let sockets = [&socket_a, &socket_b];
+
+    // Cut the same socket through both mating flanges. The shell API still
+    // supports embedded registration geometry, but this sample deliberately
+    // uses loose inserts because that is more FDM-friendly.
+    let lower_flange = kernel.difference(
+        &kernel.difference(&lower_flange, &socket_a)?,
+        &socket_b,
+    )?;
+    let upper_flange = kernel.difference(
+        &kernel.difference(&upper_flange, &socket_a)?,
+        &socket_b,
+    )?;
+    let no_solids: [&ManifoldSolid; 0] = [];
 
     let mold = generate_sectioned_shell_mold_with_parting(
         &kernel,
@@ -48,8 +87,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             positive: &upper_region,
             negative_flange: Some(&lower_flange),
             positive_flange: Some(&upper_flange),
-            negative_keys: &keys,
-            positive_sockets: &sockets,
+            negative_keys: &no_solids,
+            positive_sockets: &no_solids,
         },
         Axis::Y,
         NonZeroUsize::new(2).unwrap(),
@@ -68,8 +107,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             output.join(format!("mold-upper-{:02}.stl", index + 1)),
         )?;
     }
+    kernel.export_stl(&insert_a, output.join("registration-insert-a.stl"))?;
+    kernel.export_stl(&insert_b, output.join("registration-insert-b.stl"))?;
 
-    let mut assembly = Vec::with_capacity(1 + mold.negative.len() + mold.positive.len());
+    let mut assembly = Vec::with_capacity(3 + mold.negative.len() + mold.positive.len());
     assembly.push(ThreeMfObject {
         name: "wing".to_owned(),
         solid: &part,
@@ -86,6 +127,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             solid: piece,
         });
     }
+    assembly.push(ThreeMfObject {
+        name: "registration-insert-a".to_owned(),
+        solid: &insert_a,
+    });
+    assembly.push(ThreeMfObject {
+        name: "registration-insert-b".to_owned(),
+        solid: &insert_b,
+    });
+
     write_3mf(
         output.join("gull-wing-mold-assembly.3mf"),
         "Gull wing mold validation assembly",
@@ -102,13 +152,14 @@ enum FlangeSide {
     Trailing,
 }
 
-fn diamond_key(
+fn diamond_prism(
     spec: &WingSpec,
     side: FlangeSide,
     center_span: f64,
     chord_half_width: f64,
     span_half_width: f64,
-    height: f64,
+    normal_min: f64,
+    normal_max: f64,
 ) -> Result<Manifold, Box<dyn std::error::Error>> {
     let center = interpolate_station(spec, center_span)?;
     let inboard = interpolate_station(spec, center_span - span_half_width)?;
@@ -118,18 +169,15 @@ fn diamond_key(
     let inboard_x = flange_center_x(&inboard, side);
     let outboard_x = flange_center_x(&outboard, side);
 
-    let base = [
-        transform_station(&center, center_x - chord_half_width, -0.5),
-        transform_station(&inboard, inboard_x, -0.5),
-        transform_station(&center, center_x + chord_half_width, -0.5),
-        transform_station(&outboard, outboard_x, -0.5),
+    let footprint = [
+        transform_station(&center, center_x - chord_half_width, 0.0),
+        transform_station(&inboard, inboard_x, 0.0),
+        transform_station(&center, center_x + chord_half_width, 0.0),
+        transform_station(&outboard, outboard_x, 0.0),
     ];
-    let top = [
-        transform_station(&center, center_x - chord_half_width, height),
-        transform_station(&inboard, inboard_x, height),
-        transform_station(&center, center_x + chord_half_width, height),
-        transform_station(&outboard, outboard_x, height),
-    ];
+    let normal = flange_normal(spec, side, center_span)?;
+    let base = footprint.map(|point| add_scaled(point, normal, normal_min));
+    let top = footprint.map(|point| add_scaled(point, normal, normal_max));
 
     let mut mesh = MeshGL64 {
         num_prop: 3,
@@ -145,9 +193,35 @@ fn diamond_key(
 
     let solid = Manifold::from_mesh_gl64(&mesh);
     if solid.status().to_str() != "No Error" {
-        return Err(format!("invalid diamond key: {}", solid.status()).into());
+        return Err(format!("invalid diamond prism: {}", solid.status()).into());
     }
     Ok(solid)
+}
+
+fn flange_normal(
+    spec: &WingSpec,
+    side: FlangeSide,
+    span: f64,
+) -> Result<[f64; 3], Box<dyn std::error::Error>> {
+    let center = interpolate_station(spec, span)?;
+    let inboard = interpolate_station(spec, span - 1.0)?;
+    let outboard = interpolate_station(spec, span + 1.0)?;
+    let center_x = flange_center_x(&center, side);
+
+    let chord_a = transform_station(&center, center_x - 1.0, 0.0);
+    let chord_b = transform_station(&center, center_x + 1.0, 0.0);
+    let span_a = transform_station(&inboard, flange_center_x(&inboard, side), 0.0);
+    let span_b = transform_station(&outboard, flange_center_x(&outboard, side), 0.0);
+
+    let chord_tangent = sub(chord_b, chord_a);
+    let span_tangent = sub(span_b, span_a);
+    let mut normal = normalize(cross(chord_tangent, span_tangent))?;
+
+    // Keep the normal consistently on the upper side of the parting surface.
+    if normal[2] < 0.0 {
+        normal = [-normal[0], -normal[1], -normal[2]];
+    }
+    Ok(normal)
 }
 
 fn flange_center_x(station: &WingStation, side: FlangeSide) -> f64 {
@@ -164,6 +238,34 @@ fn connect_ring(mesh: &mut MeshGL64, lower: u64, upper: u64) {
         mesh.tri_verts
             .extend([lower + i, upper + next, lower + next]);
     }
+}
+
+fn add_scaled(point: [f64; 3], direction: [f64; 3], scale: f64) -> [f64; 3] {
+    [
+        point[0] + direction[0] * scale,
+        point[1] + direction[1] * scale,
+        point[2] + direction[2] * scale,
+    ]
+}
+
+fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn normalize(v: [f64; 3]) -> Result<[f64; 3], Box<dyn std::error::Error>> {
+    let length = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    if length <= f64::EPSILON {
+        return Err("cannot determine flange normal".into());
+    }
+    Ok([v[0] / length, v[1] / length, v[2] / length])
 }
 
 fn interpolate_station(
