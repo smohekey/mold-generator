@@ -6,11 +6,7 @@ use std::{
 };
 
 use mold_manifold::ManifoldSolid;
-use zip::{
-    CompressionMethod, ZipWriter,
-    result::ZipError,
-    write::SimpleFileOptions,
-};
+use zip::{CompressionMethod, ZipWriter, result::ZipError, write::SimpleFileOptions};
 
 pub struct ThreeMfObject<'a> {
     pub name: String,
