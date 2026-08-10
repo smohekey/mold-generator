@@ -7,6 +7,31 @@ use mold_manifold::{ManifoldKernel, ManifoldSolid};
 use mold_shell::{PartingRegions, ShellSettings, generate_sectioned_shell_mold_with_parting};
 use mold_test_models::{WingSpec, WingStation};
 
+const SEGMENT_COUNT: usize = 2;
+
+#[derive(Debug, Clone, Copy)]
+struct RegistrationSettings {
+    chord_half_width: f64,
+    span_half_width: f64,
+    normal_half_depth: f64,
+    max_spacing_ratio: f64,
+    edge_margin_ratio: f64,
+    minimum_per_segment: usize,
+}
+
+impl Default for RegistrationSettings {
+    fn default() -> Self {
+        Self {
+            chord_half_width: 5.0,
+            span_half_width: 7.0,
+            normal_half_depth: 2.25,
+            max_spacing_ratio: 10.0,
+            edge_margin_ratio: 1.5,
+            minimum_per_segment: 2,
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output = Path::new("target/sample-mold");
     fs::create_dir_all(output)?;
@@ -22,32 +47,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let lower_flange = ManifoldSolid(chord_region(&spec, -3.0, 0.0, 12.0)?);
     let upper_flange = ManifoldSolid(chord_region(&spec, 0.0, 3.0, 12.0)?);
 
-    // The exact same solids are exported as loose registration inserts and
-    // used as boolean cutters in both mold halves. This deliberately has zero
-    // clearance for visual validation; production clearance can be added once
-    // the socket placement is confirmed.
-    let insert_a = ManifoldSolid(diamond_prism(
-        &spec,
-        FlangeSide::Leading,
-        95.0,
-        5.0,
-        7.0,
-        -2.0,
-        2.0,
-    )?);
-    let insert_b = ManifoldSolid(diamond_prism(
-        &spec,
-        FlangeSide::Trailing,
-        410.0,
-        4.5,
-        6.0,
-        -2.25,
-        2.25,
-    )?);
+    let registration = RegistrationSettings::default();
+    let inserts = registration_inserts(&spec, SEGMENT_COUNT, registration)?;
+    println!(
+        "placed {} registration inserts across {} segments",
+        inserts.len(),
+        SEGMENT_COUNT
+    );
 
     let kernel = ManifoldKernel;
     let part = ManifoldSolid(wing);
-    let socket_cutters = [&insert_a, &insert_b];
+    let socket_cutters: Vec<&ManifoldSolid> = inserts.iter().map(|insert| &insert.solid).collect();
 
     let mold = generate_sectioned_shell_mold_with_parting(
         &kernel,
@@ -61,7 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             positive_sockets: &socket_cutters,
         },
         Axis::Y,
-        NonZeroUsize::new(2).unwrap(),
+        NonZeroUsize::new(SEGMENT_COUNT).unwrap(),
         ShellSettings::default(),
     )?;
 
@@ -77,10 +87,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             output.join(format!("mold-upper-{:02}.stl", index + 1)),
         )?;
     }
-    kernel.export_stl(&insert_a, output.join("registration-insert-a.stl"))?;
-    kernel.export_stl(&insert_b, output.join("registration-insert-b.stl"))?;
+    for insert in &inserts {
+        kernel.export_stl(&insert.solid, output.join(format!("{}.stl", insert.name)))?;
+    }
 
-    let mut assembly = Vec::with_capacity(3 + mold.negative.len() + mold.positive.len());
+    let mut assembly = Vec::with_capacity(1 + mold.negative.len() + mold.positive.len() + inserts.len());
     assembly.push(ThreeMfObject {
         name: "wing".to_owned(),
         solid: &part,
@@ -97,14 +108,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             solid: piece,
         });
     }
-    assembly.push(ThreeMfObject {
-        name: "registration-insert-a".to_owned(),
-        solid: &insert_a,
-    });
-    assembly.push(ThreeMfObject {
-        name: "registration-insert-b".to_owned(),
-        solid: &insert_b,
-    });
+    for insert in &inserts {
+        assembly.push(ThreeMfObject {
+            name: insert.name.clone(),
+            solid: &insert.solid,
+        });
+    }
 
     write_3mf(
         output.join("gull-wing-mold-assembly.3mf"),
@@ -114,6 +123,84 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("generated visual sample in {}", output.display());
     Ok(())
+}
+
+struct RegistrationInsert {
+    name: String,
+    solid: ManifoldSolid,
+}
+
+fn registration_inserts(
+    spec: &WingSpec,
+    segment_count: usize,
+    settings: RegistrationSettings,
+) -> Result<Vec<RegistrationInsert>, Box<dyn std::error::Error>> {
+    let span_start = spec.stations.first().ok_or("wing has no stations")?.span;
+    let span_end = spec.stations.last().ok_or("wing has no stations")?.span;
+    let segment_length = (span_end - span_start) / segment_count as f64;
+    let fixture_size = settings.span_half_width * 2.0;
+    let max_spacing = fixture_size * settings.max_spacing_ratio;
+    let edge_margin = fixture_size * settings.edge_margin_ratio;
+    let mut inserts = Vec::new();
+
+    for segment in 0..segment_count {
+        let start = span_start + segment as f64 * segment_length;
+        let end = start + segment_length;
+        let usable_start = start + edge_margin;
+        let usable_end = end - edge_margin;
+        let usable_length = (usable_end - usable_start).max(0.0);
+        let spacing_count = if max_spacing > 0.0 {
+            (usable_length / max_spacing).ceil() as usize
+        } else {
+            1
+        };
+        let count = settings.minimum_per_segment.max(spacing_count + 1);
+
+        for side in [FlangeSide::Leading, FlangeSide::Trailing] {
+            for index in 0..count {
+                let t = if count == 1 {
+                    0.5
+                } else {
+                    index as f64 / (count - 1) as f64
+                };
+                let base_span = usable_start + usable_length * t;
+                let stagger = match side {
+                    FlangeSide::Leading => 0.0,
+                    FlangeSide::Trailing => {
+                        let nominal_spacing = if count > 1 {
+                            usable_length / (count - 1) as f64
+                        } else {
+                            0.0
+                        };
+                        0.15 * nominal_spacing * if index % 2 == 0 { 1.0 } else { -1.0 }
+                    }
+                };
+                let center_span = (base_span + stagger)
+                    .clamp(start + edge_margin, end - edge_margin);
+                let side_name = match side {
+                    FlangeSide::Leading => "leading",
+                    FlangeSide::Trailing => "trailing",
+                };
+                let name = format!(
+                    "registration-insert-s{:02}-{side_name}-{:02}",
+                    segment + 1,
+                    index + 1
+                );
+                let solid = ManifoldSolid(diamond_prism(
+                    spec,
+                    side,
+                    center_span,
+                    settings.chord_half_width,
+                    settings.span_half_width,
+                    -settings.normal_half_depth,
+                    settings.normal_half_depth,
+                )?);
+                inserts.push(RegistrationInsert { name, solid });
+            }
+        }
+    }
+
+    Ok(inserts)
 }
 
 #[derive(Debug, Clone, Copy)]
