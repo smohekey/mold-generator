@@ -12,4 +12,5 @@ mold-geometry.workspace = true
 [dev-dependencies]
 manifold-rust.workspace = true
 mold-manifold.workspace = true
+mold-3mf.workspace = true
 mold-test-models.workspace = true
