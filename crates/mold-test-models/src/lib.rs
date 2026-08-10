@@ -479,9 +479,8 @@ pub fn chord_band_region(
     checked_mesh(mesh, "chord band region")
 }
 
-/// A rectangular wing-following loft used as the source volume for external
-/// segment flanges. Subtracting the wing leaves material only outside the
-/// cavity while preserving a mating face at each requested span station.
+/// An offset-airfoil loft used as the source volume for external segment
+/// flanges. Subtracting the wing leaves a profile-following ring.
 pub fn transverse_flange_blank(
     spec: &WingSpec,
     sections: &[(f64, f64)],
@@ -494,24 +493,75 @@ pub fn transverse_flange_blank(
             "transverse flange sections need increasing spans and positive margins",
         ));
     }
+    let section_profile = profile(spec.airfoil, spec.profile_points, spec.closed_trailing_edge);
+    let loop_len = section_profile.len();
     let mut mesh = MeshGL64 {
         num_prop: 3,
         ..Default::default()
     };
     for &(span, margin) in sections {
         let station = interpolate_station(spec, span)?;
-        for &(x, z) in &[
-            (-margin, -margin),
-            (station.chord + margin, -margin),
-            (station.chord + margin, margin),
-            (-margin, margin),
-        ] {
+        let section: Vec<[f64; 2]> = section_profile
+            .iter()
+            .map(|&(x, z)| [x * station.chord, z * station.chord])
+            .collect();
+        for [x, z] in offset_closed_profile(&section, margin) {
             mesh.vert_properties
                 .extend(transform_station(&station, x, z));
         }
     }
-    close_quad_loft(&mut mesh, sections.len());
+    for section in 0..sections.len() - 1 {
+        let a = section * loop_len;
+        let b = (section + 1) * loop_len;
+        for index in 0..loop_len {
+            let next = (index + 1) % loop_len;
+            mesh.tri_verts.extend([
+                (a + index) as u64,
+                (b + index) as u64,
+                (b + next) as u64,
+                (a + index) as u64,
+                (b + next) as u64,
+                (a + next) as u64,
+            ]);
+        }
+    }
+    for index in 1..loop_len - 1 {
+        mesh.tri_verts.extend([0, index as u64, (index + 1) as u64]);
+    }
+    let end = (sections.len() - 1) * loop_len;
+    for index in 1..loop_len - 1 {
+        mesh.tri_verts
+            .extend([end as u64, (end + index + 1) as u64, (end + index) as u64]);
+    }
     checked_mesh(mesh, "transverse flange blank")
+}
+
+fn offset_closed_profile(profile: &[[f64; 2]], distance: f64) -> Vec<[f64; 2]> {
+    (0..profile.len())
+        .map(|index| {
+            let previous = profile[(index + profile.len() - 1) % profile.len()];
+            let current = profile[index];
+            let next = profile[(index + 1) % profile.len()];
+            let previous_edge = [current[0] - previous[0], current[1] - previous[1]];
+            let next_edge = [next[0] - current[0], next[1] - current[1]];
+            let previous_length = previous_edge[0].hypot(previous_edge[1]);
+            let next_length = next_edge[0].hypot(next_edge[1]);
+            let previous_normal = [
+                previous_edge[1] / previous_length,
+                -previous_edge[0] / previous_length,
+            ];
+            let next_normal = [next_edge[1] / next_length, -next_edge[0] / next_length];
+            let bisector = [
+                previous_normal[0] + next_normal[0],
+                previous_normal[1] + next_normal[1],
+            ];
+            let length = bisector[0].hypot(bisector[1]);
+            [
+                current[0] + bisector[0] / length * distance,
+                current[1] + bisector[1] / length * distance,
+            ]
+        })
+        .collect()
 }
 
 pub fn registration_diamond(
@@ -1103,5 +1153,6 @@ mod tests {
 
         assert!(!flange.is_empty());
         assert!(flange.volume() > 0.0);
+        assert!(flange.num_vert() > 20);
     }
 }

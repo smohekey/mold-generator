@@ -277,15 +277,15 @@ fn add_segment_join_flanges(
                 spec,
                 ((range.0 + range.1) * 0.5).clamp(model_start, model_end),
             )?;
-            let half_fraction = settings.axial_thickness / center.chord * 0.5;
+            let half_fraction = settings.width / center.chord * 0.5;
             let blank = ManifoldSolid(chord_band_region(
                 spec,
                 (
                     (chord_fraction - half_fraction).max(0.0),
                     (chord_fraction + half_fraction).min(1.0),
                 ),
-                -settings.width,
-                settings.width,
+                -settings.axial_thickness * 0.5,
+                settings.axial_thickness * 0.5,
                 settings.width,
             )?);
             let clip = kernel.cuboid(Bounds3 {
