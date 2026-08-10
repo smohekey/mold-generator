@@ -43,6 +43,14 @@ pub trait SolidKernel {
     fn bounds(&self, solid: &Self::Solid) -> Result<Bounds3, Self::Error>;
     fn cuboid(&self, bounds: Bounds3) -> Result<Self::Solid, Self::Error>;
     fn union(&self, a: &Self::Solid, b: &Self::Solid) -> Result<Self::Solid, Self::Error>;
+    /// Union only connected components of `additions` that overlap `base`.
+    /// This is useful for generated reinforcement where disconnected fragments
+    /// must never become part of the printable output.
+    fn union_attached(
+        &self,
+        base: &Self::Solid,
+        additions: &Self::Solid,
+    ) -> Result<Self::Solid, Self::Error>;
     fn difference(&self, a: &Self::Solid, b: &Self::Solid) -> Result<Self::Solid, Self::Error>;
     fn intersection(&self, a: &Self::Solid, b: &Self::Solid) -> Result<Self::Solid, Self::Error>;
 

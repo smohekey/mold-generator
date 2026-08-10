@@ -187,6 +187,36 @@ impl SolidKernel for ManifoldKernel {
         self.checked(a.0.union(&b.0))
     }
 
+    fn union_attached(
+        &self,
+        base: &Self::Solid,
+        additions: &Self::Solid,
+    ) -> Result<Self::Solid, Self::Error> {
+        let combined = base.0.union(&additions.0);
+        let candidates = combined.decompose();
+        let mut retained: Option<Manifold> = None;
+
+        // Preserve exactly the connected regions represented by the base. A
+        // candidate reinforcement fragment is retained only when it belongs to
+        // the combined component with the greatest overlap for a base component.
+        for base_component in base.0.decompose() {
+            let best = candidates.iter().max_by(|a, b| {
+                a.intersection(&base_component)
+                    .volume()
+                    .total_cmp(&b.intersection(&base_component).volume())
+            });
+            if let Some(best) = best
+                && best.intersection(&base_component).volume() > 1.0e-9
+            {
+                retained = Some(match retained {
+                    Some(result) => result.union(best),
+                    None => best.clone(),
+                });
+            }
+        }
+        self.checked(retained.unwrap_or_else(|| base.0.clone()))
+    }
+
     fn difference(&self, a: &Self::Solid, b: &Self::Solid) -> Result<Self::Solid, Self::Error> {
         self.checked(a.0.difference(&b.0))
     }

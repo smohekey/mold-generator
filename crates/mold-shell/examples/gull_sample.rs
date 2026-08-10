@@ -5,7 +5,9 @@ use mold_3mf::{ThreeMfObject, write_3mf};
 use mold_core::Axis;
 use mold_geometry::SolidKernel;
 use mold_manifold::{ManifoldKernel, ManifoldSolid};
-use mold_shell::{PartingRegions, ShellSettings, generate_sectioned_shell_mold_with_parting};
+use mold_shell::{
+    PartingRegions, ShellSettings, WebbingSettings, generate_sectioned_shell_mold_with_parting,
+};
 use mold_test_models::{WingSpec, WingStation};
 
 const SEGMENT_COUNT: usize = 2;
@@ -69,6 +71,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let kernel = ManifoldKernel;
     let part = ManifoldSolid(wing);
     let socket_cutters: Vec<&ManifoldSolid> = inserts.iter().map(|insert| &insert.solid).collect();
+    let webbing = WebbingSettings::default();
+    let (lower_ribs, upper_ribs) = diagonal_ribs(
+        &spec,
+        SEGMENT_COUNT,
+        registration,
+        webbing.thickness(),
+        webbing.depth,
+    )?;
 
     let baseline_settings = ShellSettings {
         structural_webbing: None,
@@ -92,7 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         baseline_settings,
     )?;
 
-    let mold = generate_sectioned_shell_mold_with_parting(
+    let mut mold = generate_sectioned_shell_mold_with_parting(
         &kernel,
         &part,
         PartingRegions {
@@ -107,7 +117,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         Axis::Y,
         NonZeroUsize::new(SEGMENT_COUNT).unwrap(),
-        ShellSettings::default(),
+        baseline_settings,
+    )?;
+
+    attach_ribs(
+        &kernel,
+        &part,
+        &mut mold.negative,
+        &lower_ribs,
+        &socket_cutters,
+    )?;
+    attach_ribs(
+        &kernel,
+        &part,
+        &mut mold.positive,
+        &upper_ribs,
+        &socket_cutters,
     )?;
 
     let lower_webbing: Vec<ManifoldSolid> = mold
@@ -122,14 +147,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .zip(&baseline.positive)
         .map(|(webbed, plain)| kernel.difference(webbed, plain))
         .collect::<Result<_, _>>()?;
-    let webbing = ShellSettings::default().structural_webbing.unwrap();
+    validate_attached_webbing("lower", &mold.negative, &baseline.negative, &lower_webbing)?;
+    validate_attached_webbing("upper", &mold.positive, &baseline.positive, &upper_webbing)?;
     println!(
-        "structural webbing: {} longitudinal webs, {:.2} mm thick ({} x {:.2} mm extrusion), max brace spacing {:.1} mm, depth {:.1} mm",
-        webbing.longitudinal_web_count,
+        "structural webbing: {} lower + {} upper flange-anchored diagonal ribs, {:.2} mm thick ({} x {:.2} mm extrusion), depth {:.1} mm",
+        lower_ribs.len(),
+        upper_ribs.len(),
         webbing.thickness(),
         webbing.wall_line_count,
         webbing.extrusion_width,
-        webbing.max_brace_spacing,
         webbing.depth,
     );
 
@@ -296,6 +322,153 @@ fn fixture_spans(
             usable_start + usable_length * t
         })
         .collect()
+}
+
+fn diagonal_ribs(
+    spec: &WingSpec,
+    segment_count: usize,
+    registration: RegistrationSettings,
+    thickness: f64,
+    depth: f64,
+) -> Result<(Vec<ManifoldSolid>, Vec<ManifoldSolid>), Box<dyn std::error::Error>> {
+    let span_start = spec.stations.first().ok_or("wing has no stations")?.span;
+    let span_end = spec.stations.last().ok_or("wing has no stations")?.span;
+    let segment_length = (span_end - span_start) / segment_count as f64;
+    let mut lower = Vec::new();
+    let mut upper = Vec::new();
+
+    for segment in 0..segment_count {
+        let start = span_start + segment as f64 * segment_length;
+        let end = start + segment_length;
+        let leading = fixture_spans(start, end, registration.leading, registration);
+        let trailing = fixture_spans(start, end, registration.trailing, registration);
+        let vertex_count = leading.len().min(trailing.len());
+
+        for index in 0..vertex_count.saturating_sub(1) {
+            let (a_side, a_span, b_side, b_span) = if index % 2 == 0 {
+                (
+                    FlangeSide::Leading,
+                    leading[index],
+                    FlangeSide::Trailing,
+                    trailing[index + 1],
+                )
+            } else {
+                (
+                    FlangeSide::Trailing,
+                    trailing[index],
+                    FlangeSide::Leading,
+                    leading[index + 1],
+                )
+            };
+            let a = flange_point(spec, a_side, a_span)?;
+            let b = flange_point(spec, b_side, b_span)?;
+            lower.push(ManifoldSolid(rib_prism(a, b, thickness, -depth)?));
+            upper.push(ManifoldSolid(rib_prism(a, b, thickness, depth)?));
+        }
+    }
+    Ok((lower, upper))
+}
+
+fn attach_ribs(
+    kernel: &ManifoldKernel,
+    part: &ManifoldSolid,
+    pieces: &mut [ManifoldSolid],
+    ribs: &[ManifoldSolid],
+    exclusions: &[&ManifoldSolid],
+) -> Result<(), Box<dyn std::error::Error>> {
+    for piece in pieces {
+        for rib in ribs {
+            let mut printable = kernel.difference(rib, part)?;
+            for exclusion in exclusions {
+                printable = kernel.difference(&printable, exclusion)?;
+            }
+            *piece = kernel.union_attached(piece, &printable)?;
+        }
+        // Registration remains the final authoritative operation.
+        for exclusion in exclusions {
+            *piece = kernel.difference(piece, exclusion)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_attached_webbing(
+    half: &str,
+    webbed: &[ManifoldSolid],
+    baseline: &[ManifoldSolid],
+    additions: &[ManifoldSolid],
+) -> Result<(), Box<dyn std::error::Error>> {
+    for (index, ((piece, plain), added)) in webbed.iter().zip(baseline).zip(additions).enumerate() {
+        let component_count = piece.0.decompose().len();
+        let baseline_count = plain.0.decompose().len();
+        if component_count > baseline_count {
+            return Err(format!(
+                "{half} segment {} gained a disconnected webbing component",
+                index + 1
+            )
+            .into());
+        }
+        if added.0.is_empty() || added.0.volume() <= 1.0e-9 {
+            return Err(format!("{half} segment {} has no attached webbing", index + 1).into());
+        }
+        println!(
+            "{half} segment {}: attached webbing volume {:.3} mm^3, {component_count} connected component(s)",
+            index + 1,
+            added.0.volume(),
+        );
+    }
+    Ok(())
+}
+
+fn flange_point(
+    spec: &WingSpec,
+    side: FlangeSide,
+    span: f64,
+) -> Result<[f64; 3], Box<dyn std::error::Error>> {
+    let station = interpolate_station(spec, span)?;
+    Ok(transform_station(
+        &station,
+        flange_center_x(&station, side),
+        0.0,
+    ))
+}
+
+fn rib_prism(
+    start: [f64; 3],
+    end: [f64; 3],
+    thickness: f64,
+    depth: f64,
+) -> Result<Manifold, Box<dyn std::error::Error>> {
+    let direction = sub(end, start);
+    let side = normalize([-direction[1], direction[0], 0.0])?;
+    let half = thickness * 0.5;
+    let flange_ring = [
+        add_scaled(start, side, -half),
+        add_scaled(end, side, -half),
+        add_scaled(end, side, half),
+        add_scaled(start, side, half),
+    ];
+    let offset_ring = flange_ring.map(|point| [point[0], point[1], point[2] + depth]);
+    let (lower, upper) = if depth > 0.0 {
+        (flange_ring, offset_ring)
+    } else {
+        (offset_ring, flange_ring)
+    };
+    let mut mesh = MeshGL64 {
+        num_prop: 3,
+        ..Default::default()
+    };
+    for point in lower.into_iter().chain(upper) {
+        mesh.vert_properties.extend(point);
+    }
+    connect_ring(&mut mesh, 0, 4);
+    mesh.tri_verts.extend([0, 2, 1, 0, 3, 2]);
+    mesh.tri_verts.extend([4, 5, 6, 4, 6, 7]);
+    let solid = Manifold::from_mesh_gl64(&mesh);
+    if solid.status().to_str() != "No Error" {
+        return Err(format!("invalid diagonal rib: {}", solid.status()).into());
+    }
+    Ok(solid)
 }
 
 #[derive(Debug, Clone, Copy)]
