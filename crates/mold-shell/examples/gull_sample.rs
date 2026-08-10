@@ -422,10 +422,12 @@ fn diagonal_ribs(
                     leading[index + 1],
                 )
             };
-            let a = flange_point(spec, a_side, a_span)?;
-            let b = flange_point(spec, b_side, b_span)?;
-            lower.push(ManifoldSolid(rib_prism(a, b, thickness, -depth)?));
-            upper.push(ManifoldSolid(rib_prism(a, b, thickness, depth)?));
+            lower.push(ManifoldSolid(profiled_rib(
+                spec, a_side, a_span, b_side, b_span, thickness, -depth,
+            )?));
+            upper.push(ManifoldSolid(profiled_rib(
+                spec, a_side, a_span, b_side, b_span, thickness, depth,
+            )?));
         }
     }
     Ok((lower, upper))
@@ -482,55 +484,96 @@ fn validate_attached_webbing(
     Ok(())
 }
 
-fn flange_point(
+fn profiled_rib(
     spec: &WingSpec,
-    side: FlangeSide,
-    span: f64,
-) -> Result<[f64; 3], Box<dyn std::error::Error>> {
-    let station = interpolate_station(spec, span)?;
-    Ok(transform_station(
-        &station,
-        flange_center_x(&station, side),
-        0.0,
-    ))
-}
-
-fn rib_prism(
-    start: [f64; 3],
-    end: [f64; 3],
+    start_side: FlangeSide,
+    start_span: f64,
+    end_side: FlangeSide,
+    end_span: f64,
     thickness: f64,
     depth: f64,
 ) -> Result<Manifold, Box<dyn std::error::Error>> {
-    let direction = sub(end, start);
-    let side = normalize([-direction[1], direction[0], 0.0])?;
+    const SAMPLES: usize = 24;
+    let centers: Vec<[f64; 3]> = (0..=SAMPLES)
+        .map(|index| {
+            let t = index as f64 / SAMPLES as f64;
+            let span = lerp(start_span, end_span, t);
+            let station = interpolate_station(spec, span)?;
+            let start_x = flange_center_x(&station, start_side);
+            let end_x = flange_center_x(&station, end_side);
+            let x = lerp(start_x, end_x, t);
+            profile_surface_point(spec, &station, x, depth > 0.0)
+        })
+        .collect::<Result<_, Box<dyn std::error::Error>>>()?;
+
     let half = thickness * 0.5;
-    let flange_ring = [
-        add_scaled(start, side, -half),
-        add_scaled(end, side, -half),
-        add_scaled(end, side, half),
-        add_scaled(start, side, half),
-    ];
-    let offset_ring = flange_ring.map(|point| [point[0], point[1], point[2] + depth]);
-    let (lower, upper) = if depth > 0.0 {
-        (flange_ring, offset_ring)
-    } else {
-        (offset_ring, flange_ring)
-    };
     let mut mesh = MeshGL64 {
         num_prop: 3,
         ..Default::default()
     };
-    for point in lower.into_iter().chain(upper) {
-        mesh.vert_properties.extend(point);
+    for (index, &center) in centers.iter().enumerate() {
+        let before = centers[index.saturating_sub(1)];
+        let after = centers[(index + 1).min(SAMPLES)];
+        let tangent = sub(after, before);
+        let side = normalize([-tangent[1], tangent[0], 0.0])?;
+        let surface_left = add_scaled(center, side, -half);
+        let surface_right = add_scaled(center, side, half);
+        let outer_left = [surface_left[0], surface_left[1], surface_left[2] + depth];
+        let outer_right = [surface_right[0], surface_right[1], surface_right[2] + depth];
+        let ring = if depth > 0.0 {
+            [surface_left, surface_right, outer_right, outer_left]
+        } else {
+            [outer_left, outer_right, surface_right, surface_left]
+        };
+        for point in ring {
+            mesh.vert_properties.extend(point);
+        }
     }
-    connect_ring(&mut mesh, 0, 4);
+    for index in 0..SAMPLES {
+        connect_ring(&mut mesh, (index * 4) as u64, ((index + 1) * 4) as u64);
+    }
     mesh.tri_verts.extend([0, 2, 1, 0, 3, 2]);
-    mesh.tri_verts.extend([4, 5, 6, 4, 6, 7]);
+    let end = (SAMPLES * 4) as u64;
+    mesh.tri_verts
+        .extend([end, end + 1, end + 2, end, end + 2, end + 3]);
     let solid = Manifold::from_mesh_gl64(&mesh);
     if solid.status().to_str() != "No Error" {
         return Err(format!("invalid diagonal rib: {}", solid.status()).into());
     }
     Ok(solid)
+}
+
+fn profile_surface_point(
+    spec: &WingSpec,
+    station: &WingStation,
+    x: f64,
+    upper: bool,
+) -> Result<[f64; 3], Box<dyn std::error::Error>> {
+    if x <= 0.0 || x >= station.chord {
+        return Ok(transform_station(station, x, 0.0));
+    }
+    let normalized_x = x / station.chord;
+    let naca = spec.airfoil;
+    let trailing = if spec.closed_trailing_edge {
+        -0.1036
+    } else {
+        -0.1015
+    };
+    let thickness = 5.0
+        * naca.thickness
+        * (0.2969 * normalized_x.sqrt() - 0.1260 * normalized_x - 0.3516 * normalized_x.powi(2)
+            + 0.2843 * normalized_x.powi(3)
+            + trailing * normalized_x.powi(4));
+    let camber = if normalized_x < naca.camber_position {
+        naca.max_camber / naca.camber_position.powi(2)
+            * (2.0 * naca.camber_position * normalized_x - normalized_x.powi(2))
+    } else {
+        naca.max_camber / (1.0 - naca.camber_position).powi(2)
+            * ((1.0 - 2.0 * naca.camber_position) + 2.0 * naca.camber_position * normalized_x
+                - normalized_x.powi(2))
+    };
+    let z = (camber + if upper { thickness } else { -thickness }) * station.chord;
+    Ok(transform_station(station, x, z))
 }
 
 #[derive(Debug, Clone, Copy)]
