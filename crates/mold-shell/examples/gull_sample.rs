@@ -23,24 +23,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let lower_flange = ManifoldSolid(chord_region(&spec, -3.0, 0.0, 12.0)?);
     let upper_flange = ManifoldSolid(chord_region(&spec, 0.0, 3.0, 12.0)?);
 
-    let socket_a = ManifoldSolid(diamond_prism(
-        &spec,
-        FlangeSide::Leading,
-        95.0,
-        5.3,
-        7.3,
-        -3.5,
-        3.5,
-    )?);
-    let socket_b = ManifoldSolid(diamond_prism(
-        &spec,
-        FlangeSide::Trailing,
-        410.0,
-        4.8,
-        6.3,
-        -3.5,
-        3.5,
-    )?);
+    // The exact same solids are exported as loose registration inserts and
+    // used as boolean cutters in both mold halves. This deliberately has zero
+    // clearance for visual validation; production clearance can be added once
+    // the socket placement is confirmed.
     let insert_a = ManifoldSolid(diamond_prism(
         &spec,
         FlangeSide::Leading,
@@ -62,7 +48,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let kernel = ManifoldKernel;
     let part = ManifoldSolid(wing);
-    let sockets = [&socket_a, &socket_b];
+    let socket_cutters = [&insert_a, &insert_b];
 
     let mold = generate_sectioned_shell_mold_with_parting(
         &kernel,
@@ -72,8 +58,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             positive: &upper_region,
             negative_flange: Some(&lower_flange),
             positive_flange: Some(&upper_flange),
-            negative_sockets: &sockets,
-            positive_sockets: &sockets,
+            negative_sockets: &socket_cutters,
+            positive_sockets: &socket_cutters,
         },
         Axis::Y,
         NonZeroUsize::new(2).unwrap(),
