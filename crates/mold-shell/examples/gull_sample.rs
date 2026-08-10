@@ -23,9 +23,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let lower_flange = ManifoldSolid(chord_region(&spec, -3.0, 0.0, 12.0)?);
     let upper_flange = ManifoldSolid(chord_region(&spec, 0.0, 3.0, 12.0)?);
 
-    // The sockets are slightly larger than the standalone inserts. Both are
-    // centered on the parting surface and extruded along the actual local
-    // flange normal, derived from chord- and span-direction surface tangents.
     let socket_a = ManifoldSolid(diamond_prism(
         &spec,
         FlangeSide::Leading,
@@ -66,17 +63,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let kernel = ManifoldKernel;
     let part = ManifoldSolid(wing);
 
-    // Cut the same socket through both mating flanges. The shell API still
-    // supports embedded registration geometry, but this sample deliberately
-    // uses loose inserts because that is more FDM-friendly.
-    let lower_flange = kernel.difference(
-        &kernel.difference(&lower_flange, &socket_a)?,
-        &socket_b,
-    )?;
-    let upper_flange = kernel.difference(
-        &kernel.difference(&upper_flange, &socket_a)?,
-        &socket_b,
-    )?;
+    let lower_flange =
+        kernel.difference(&kernel.difference(&lower_flange, &socket_a)?, &socket_b)?;
+    let upper_flange =
+        kernel.difference(&kernel.difference(&upper_flange, &socket_a)?, &socket_b)?;
     let no_solids: [&ManifoldSolid; 0] = [];
 
     let mold = generate_sectioned_shell_mold_with_parting(
@@ -217,7 +207,6 @@ fn flange_normal(
     let span_tangent = sub(span_b, span_a);
     let mut normal = normalize(cross(chord_tangent, span_tangent))?;
 
-    // Keep the normal consistently on the upper side of the parting surface.
     if normal[2] < 0.0 {
         normal = [-normal[0], -normal[1], -normal[2]];
     }
