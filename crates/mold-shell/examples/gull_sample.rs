@@ -1,4 +1,4 @@
-use std::{fs, num::NonZeroUsize, path::Path};
+use std::{fs, path::Path};
 
 use manifold_rust::{manifold::Manifold, types::MeshGL64};
 use mold_3mf::{ThreeMfObject, write_3mf};
@@ -6,7 +6,8 @@ use mold_core::Axis;
 use mold_geometry::SolidKernel;
 use mold_manifold::{ManifoldKernel, ManifoldSolid};
 use mold_shell::{
-    PartingRegions, ShellSettings, WebbingSettings, generate_sectioned_shell_mold_with_parting,
+    PartingRegions, ShellSettings, WebbingSettings,
+    generate_sectioned_shell_mold_with_parting_ranges,
 };
 use mold_test_models::{WingSpec, WingStation};
 
@@ -60,31 +61,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let lower_flange = ManifoldSolid(chord_region(&spec, -3.0, 0.0, 12.0)?);
     let upper_flange = ManifoldSolid(chord_region(&spec, 0.0, 3.0, 12.0)?);
 
+    let kernel = ManifoldKernel;
+    let part = ManifoldSolid(wing);
+    let baseline_settings = ShellSettings {
+        structural_webbing: None,
+        ..Default::default()
+    };
+    let expanded_bounds = kernel.bounds(&kernel.offset(&part, baseline_settings.thickness)?)?;
+    let segment_ranges = deviation_aware_segment_ranges(
+        &spec,
+        SEGMENT_COUNT,
+        expanded_bounds.min.y,
+        expanded_bounds.max.y,
+    )?;
+    println!("deviation-aware segment ranges: {segment_ranges:?}");
+
     let registration = RegistrationSettings::default();
-    let inserts = registration_inserts(&spec, SEGMENT_COUNT, registration)?;
+    let inserts = registration_inserts(&spec, &segment_ranges, registration)?;
     println!(
         "placed {} registration inserts across {} segments",
         inserts.len(),
-        SEGMENT_COUNT
+        segment_ranges.len()
     );
-
-    let kernel = ManifoldKernel;
-    let part = ManifoldSolid(wing);
     let socket_cutters: Vec<&ManifoldSolid> = inserts.iter().map(|insert| &insert.solid).collect();
     let webbing = WebbingSettings::default();
     let (lower_ribs, upper_ribs) = diagonal_ribs(
         &spec,
-        SEGMENT_COUNT,
+        &segment_ranges,
         registration,
         webbing.thickness(),
         webbing.depth,
     )?;
 
-    let baseline_settings = ShellSettings {
-        structural_webbing: None,
-        ..Default::default()
-    };
-    let baseline = generate_sectioned_shell_mold_with_parting(
+    let baseline = generate_sectioned_shell_mold_with_parting_ranges(
         &kernel,
         &part,
         PartingRegions {
@@ -98,11 +107,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             positive_webbing_exclusions: &[],
         },
         Axis::Y,
-        NonZeroUsize::new(SEGMENT_COUNT).unwrap(),
+        &segment_ranges,
         baseline_settings,
     )?;
 
-    let mut mold = generate_sectioned_shell_mold_with_parting(
+    let mut mold = generate_sectioned_shell_mold_with_parting_ranges(
         &kernel,
         &part,
         PartingRegions {
@@ -116,7 +125,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             positive_webbing_exclusions: &[],
         },
         Axis::Y,
-        NonZeroUsize::new(SEGMENT_COUNT).unwrap(),
+        &segment_ranges,
         baseline_settings,
     )?;
 
@@ -239,20 +248,78 @@ struct RegistrationInsert {
     solid: ManifoldSolid,
 }
 
-fn registration_inserts(
+fn deviation_aware_segment_ranges(
     spec: &WingSpec,
     segment_count: usize,
+    outer_min: f64,
+    outer_max: f64,
+) -> Result<Vec<(f64, f64)>, Box<dyn std::error::Error>> {
+    if segment_count == 0 {
+        return Err("segment count must be positive".into());
+    }
+    let first = spec.stations.first().ok_or("wing has no stations")?.span;
+    let last = spec.stations.last().ok_or("wing has no stations")?.span;
+    let mut candidates: Vec<(f64, f64)> = spec
+        .stations
+        .windows(3)
+        .map(|stations| {
+            let incoming = station_axis(stations[0], stations[1]);
+            let outgoing = station_axis(stations[1], stations[2]);
+            let cosine = dot(incoming, outgoing).clamp(-1.0, 1.0);
+            (stations[1].span, cosine.acos())
+        })
+        .collect();
+    candidates.sort_by(|a, b| b.1.total_cmp(&a.1));
+
+    let mut boundaries: Vec<f64> = candidates
+        .into_iter()
+        .take(segment_count.saturating_sub(1))
+        .map(|candidate| candidate.0)
+        .collect();
+    for index in 1..segment_count {
+        if boundaries.len() == segment_count - 1 {
+            break;
+        }
+        let fallback = first + (last - first) * index as f64 / segment_count as f64;
+        if !boundaries
+            .iter()
+            .any(|value| (value - fallback).abs() < 1.0e-6)
+        {
+            boundaries.push(fallback);
+        }
+    }
+    boundaries.sort_by(f64::total_cmp);
+    boundaries.truncate(segment_count.saturating_sub(1));
+
+    let mut edges = Vec::with_capacity(segment_count + 1);
+    edges.push(outer_min);
+    edges.extend(boundaries);
+    edges.push(outer_max);
+    Ok(edges.windows(2).map(|edge| (edge[0], edge[1])).collect())
+}
+
+fn station_axis(a: WingStation, b: WingStation) -> [f64; 3] {
+    let vector = [
+        b.x_offset - a.x_offset,
+        b.span - a.span,
+        b.z_offset - a.z_offset,
+    ];
+    let length = dot(vector, vector).sqrt();
+    [vector[0] / length, vector[1] / length, vector[2] / length]
+}
+
+fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn registration_inserts(
+    spec: &WingSpec,
+    segment_ranges: &[(f64, f64)],
     settings: RegistrationSettings,
 ) -> Result<Vec<RegistrationInsert>, Box<dyn std::error::Error>> {
-    let span_start = spec.stations.first().ok_or("wing has no stations")?.span;
-    let span_end = spec.stations.last().ok_or("wing has no stations")?.span;
-    let segment_length = (span_end - span_start) / segment_count as f64;
     let mut inserts = Vec::new();
 
-    for segment in 0..segment_count {
-        let start = span_start + segment as f64 * segment_length;
-        let end = start + segment_length;
-
+    for (segment, &(start, end)) in segment_ranges.iter().enumerate() {
         for side in [FlangeSide::Leading, FlangeSide::Trailing] {
             let fixture = match side {
                 FlangeSide::Leading => settings.leading,
@@ -326,20 +393,15 @@ fn fixture_spans(
 
 fn diagonal_ribs(
     spec: &WingSpec,
-    segment_count: usize,
+    segment_ranges: &[(f64, f64)],
     registration: RegistrationSettings,
     thickness: f64,
     depth: f64,
 ) -> Result<(Vec<ManifoldSolid>, Vec<ManifoldSolid>), Box<dyn std::error::Error>> {
-    let span_start = spec.stations.first().ok_or("wing has no stations")?.span;
-    let span_end = spec.stations.last().ok_or("wing has no stations")?.span;
-    let segment_length = (span_end - span_start) / segment_count as f64;
     let mut lower = Vec::new();
     let mut upper = Vec::new();
 
-    for segment in 0..segment_count {
-        let start = span_start + segment as f64 * segment_length;
-        let end = start + segment_length;
+    for &(start, end) in segment_ranges {
         let leading = fixture_spans(start, end, registration.leading, registration);
         let trailing = fixture_spans(start, end, registration.trailing, registration);
         let vertex_count = leading.len().min(trailing.len());

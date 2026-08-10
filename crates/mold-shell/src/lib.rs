@@ -151,9 +151,31 @@ where
     K: SolidKernel,
 {
     let expanded = kernel.offset(part, settings.thickness)?;
-    let skin = kernel.difference(&expanded, part)?;
     let expanded_bounds = kernel.bounds(&expanded)?;
     let sections = section_ranges(expanded_bounds, section_axis, section_count);
+    generate_sectioned_shell_mold_with_parting_ranges(
+        kernel,
+        part,
+        parting,
+        section_axis,
+        &sections,
+        settings,
+    )
+}
+
+pub fn generate_sectioned_shell_mold_with_parting_ranges<K>(
+    kernel: &K,
+    part: &K::Solid,
+    parting: PartingRegions<'_, K::Solid>,
+    section_axis: Axis,
+    sections: &[(f64, f64)],
+    settings: ShellSettings,
+) -> Result<SectionedTwoPartMold<K::Solid>, K::Error>
+where
+    K: SolidKernel,
+{
+    let expanded = kernel.offset(part, settings.thickness)?;
+    let skin = kernel.difference(&expanded, part)?;
     let mut negative_skin = kernel.intersection(&skin, parting.negative)?;
     let mut positive_skin = kernel.intersection(&skin, parting.positive)?;
     if let Some(flange) = parting.negative_flange {
@@ -169,8 +191,8 @@ where
     let positive_bounds = kernel.bounds(&positive_skin)?;
     let mold_bounds = union_bounds(negative_bounds, positive_bounds);
 
-    let mut negative = clip_sections(kernel, &negative_skin, mold_bounds, section_axis, &sections)?;
-    let mut positive = clip_sections(kernel, &positive_skin, mold_bounds, section_axis, &sections)?;
+    let mut negative = clip_sections(kernel, &negative_skin, mold_bounds, section_axis, sections)?;
+    let mut positive = clip_sections(kernel, &positive_skin, mold_bounds, section_axis, sections)?;
 
     if let Some(webbing) = settings.structural_webbing {
         add_structural_webbing(
@@ -668,6 +690,58 @@ mod tests {
             assert_eq!(p.0.status().to_str(), "No Error");
             assert!(!p.0.is_empty());
             assert!(p.0.volume() > 0.0);
+        }
+    }
+
+    #[test]
+    fn explicit_section_ranges_preserve_a_requested_bend_boundary() {
+        let k = ManifoldKernel;
+        let part = k
+            .cuboid(Bounds3 {
+                min: Vec3::new(-20.0, -50.0, -5.0),
+                max: Vec3::new(20.0, 50.0, 5.0),
+            })
+            .unwrap();
+        let negative_region = k
+            .cuboid(Bounds3 {
+                min: Vec3::new(-100.0, -100.0, -100.0),
+                max: Vec3::new(100.0, 100.0, 0.0),
+            })
+            .unwrap();
+        let positive_region = k
+            .cuboid(Bounds3 {
+                min: Vec3::new(-100.0, -100.0, 0.0),
+                max: Vec3::new(100.0, 100.0, 100.0),
+            })
+            .unwrap();
+        let empty = [];
+        let ranges = [(-53.0, -10.0), (-10.0, 53.0)];
+        let mold = generate_sectioned_shell_mold_with_parting_ranges(
+            &k,
+            &part,
+            PartingRegions {
+                negative: &negative_region,
+                positive: &positive_region,
+                negative_flange: None,
+                positive_flange: None,
+                negative_sockets: &empty,
+                positive_sockets: &empty,
+                negative_webbing_exclusions: &empty,
+                positive_webbing_exclusions: &empty,
+            },
+            Axis::Y,
+            &ranges,
+            ShellSettings {
+                structural_webbing: None,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        for half in [&mold.negative, &mold.positive] {
+            assert_eq!(half.len(), 2);
+            assert!((k.bounds(&half[0]).unwrap().max.y + 10.0).abs() < 1.0e-9);
+            assert!((k.bounds(&half[1]).unwrap().min.y + 10.0).abs() < 1.0e-9);
         }
     }
 }
