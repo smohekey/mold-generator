@@ -82,6 +82,7 @@ pub struct TransverseFlangeFastenerCutters {
 
 pub struct TransverseThroughFlangeFastenerCutter {
     pub surface: WingSurface,
+    pub chord_fraction: f64,
     pub cutter: Manifold,
 }
 
@@ -97,7 +98,13 @@ pub struct LongitudinalSplitFlangeFastenerCutter {
 
 struct TransverseFastenerInterfaces {
     seam_normal: [f64; 3],
-    placements: Vec<(WingSurface, [f64; 3])>,
+    placements: Vec<TransverseFastenerPlacement>,
+}
+
+struct TransverseFastenerPlacement {
+    surface: WingSurface,
+    chord_fraction: f64,
+    point: [f64; 3],
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -131,7 +138,8 @@ pub fn transverse_flange_fastener_cutters(
     )?;
     let mut cutters = Vec::with_capacity(placements.len());
 
-    for (surface, interface) in placements {
+    for placement in placements {
+        let interface = placement.point;
         let clearance_start = add_scaled(interface, seam_normal, -fasteners.cutter_overtravel);
         let clearance_end = add_scaled(
             interface,
@@ -141,7 +149,7 @@ pub fn transverse_flange_fastener_cutters(
         let pilot_start = add_scaled(interface, seam_normal, fasteners.cutter_overtravel);
         let pilot_end = add_scaled(interface, seam_normal, -fasteners.pilot_depth);
         cutters.push(TransverseFlangeFastenerCutters {
-            surface,
+            surface: placement.surface,
             clearance: oriented_cylinder(
                 clearance_start,
                 clearance_end,
@@ -180,7 +188,8 @@ pub fn transverse_through_flange_fastener_cutters(
     } = transverse_fastener_interfaces(wing, seam_span, band, fasteners)?;
     placements
         .into_iter()
-        .map(|(surface, interface)| {
+        .map(|placement| {
+            let interface = placement.point;
             let start = add_scaled(
                 interface,
                 seam_normal,
@@ -192,7 +201,8 @@ pub fn transverse_through_flange_fastener_cutters(
                 positive_depth + fasteners.cutter_overtravel,
             );
             Ok(TransverseThroughFlangeFastenerCutter {
-                surface,
+                surface: placement.surface,
+                chord_fraction: placement.chord_fraction,
                 cutter: oriented_cylinder(
                     start,
                     end,
@@ -324,10 +334,11 @@ fn transverse_fastener_interfaces(
             .ok_or(WingError::InvalidSpec(
                 "cannot project fastener placement into the seam plane",
             ))?;
-            interfaces.push((
+            interfaces.push(TransverseFastenerPlacement {
                 surface,
-                add_scaled(frame.point, radial_direction, radial_offset),
-            ));
+                chord_fraction,
+                point: add_scaled(frame.point, radial_direction, radial_offset),
+            });
         }
     }
     Ok(TransverseFastenerInterfaces {
@@ -688,7 +699,6 @@ mod tests {
             WingBaseAttachmentSettings {
                 flange_width: 15.2,
                 axial_thickness: 3.0,
-                registration: Default::default(),
             },
         )
         .unwrap();

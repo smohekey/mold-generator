@@ -16,13 +16,14 @@ use mold_shell::{
 };
 use mold_wing_geometry::{
     FlangeEndObstructions, FlangeFastenerBand, PrintableEnvelope, WingBaseAttachmentSettings,
-    WingEdge, WingFlangeFastenerSpec, WingPanelRivetSpec, WingSpec, WingSurface,
-    chord_region_extended, chord_region_with_span_margins, longitudinal_edge_fastener_cutters,
-    longitudinal_split_flange_fastener_cutters, panel_rivet_heads, printable_tile_dimensions,
-    registration_diamond, sample_longitudinal_surface_path, sampled_chord_band_region,
-    segment_normal, transverse_flange_blank, transverse_flange_fastener_cutters,
-    transverse_section_normal, transverse_through_flange_fastener_cutters,
-    wing_base_attachment_geometry, wing_segment_boundaries,
+    WingBaseRegistrationSettings, WingEdge, WingFlangeFastenerSpec, WingPanelRivetSpec, WingSpec,
+    WingSurface, chord_region_extended, chord_region_with_span_margins,
+    longitudinal_edge_fastener_cutters, longitudinal_split_flange_fastener_cutters,
+    panel_rivet_heads, printable_tile_dimensions, registration_diamond,
+    sample_longitudinal_surface_path, sampled_chord_band_region, segment_normal,
+    transverse_flange_blank, transverse_flange_fastener_cutters, transverse_section_normal,
+    transverse_through_flange_fastener_cutters, wing_base_attachment_geometry,
+    wing_base_registration_inserts, wing_segment_boundaries,
 };
 
 const FLANGE_MARGIN: f64 = 12.0;
@@ -75,6 +76,12 @@ struct EdgeFastenerHole {
     section: usize,
     edge: FlangeEdge,
     position: f64,
+    solid: ManifoldSolid,
+}
+
+struct BaseFastenerHole {
+    surface: WingSurface,
+    chord_fraction: f64,
     solid: ManifoldSolid,
 }
 
@@ -273,7 +280,6 @@ fn generate(generator: WingMoldGenerator) -> Result<(), Box<dyn std::error::Erro
         WingBaseAttachmentSettings {
             flange_width: segment_flanges.lateral_flange_margin(shell_settings.thickness),
             axial_thickness: segment_flanges.axial_thickness,
-            registration: Default::default(),
         },
     )?;
     let base_opening = ManifoldSolid(base_geometry.opening);
@@ -297,6 +303,26 @@ fn generate(generator: WingMoldGenerator) -> Result<(), Box<dyn std::error::Erro
         edge_fastener_holes.iter().map(|hole| &hole.solid),
         "longitudinal parting flange hole",
     )?;
+    let base_fastener_band = FlangeFastenerBand {
+        inner_margin: shell_settings.thickness,
+        outer_margin: segment_flanges.lateral_flange_margin(shell_settings.thickness),
+    };
+    let base_fastener_holes: Vec<BaseFastenerHole> = transverse_through_flange_fastener_cutters(
+        &spec,
+        root_span,
+        base_fastener_band.inner_margin,
+        base_fastener_band.outer_margin,
+        segment_flanges.axial_thickness,
+        segment_flanges.axial_thickness,
+        &generator.flange_fasteners,
+    )?
+    .into_iter()
+    .map(|fastener| BaseFastenerHole {
+        surface: fastener.surface,
+        chord_fraction: fastener.chord_fraction,
+        solid: ManifoldSolid(fastener.cutter),
+    })
+    .collect();
     let mut inserts = build_registration_inserts(
         &spec,
         &ranges,
@@ -305,24 +331,25 @@ fn generate(generator: WingMoldGenerator) -> Result<(), Box<dyn std::error::Erro
         registration,
     )?;
     let base_insert_start = inserts.len();
-    inserts.extend(base_geometry.registration.into_iter().map(|(edge, solid)| {
-        RegistrationInsert {
-            name: format!("registration-insert-base-{}", wing_edge_name(edge)),
-            solid: ManifoldSolid(solid),
-        }
-    }));
-    let base_fastener_cutters: Vec<ManifoldSolid> = transverse_through_flange_fastener_cutters(
+    inserts.extend(build_base_registration_inserts(
         &spec,
         root_span,
-        shell_settings.thickness,
-        segment_flanges.lateral_flange_margin(shell_settings.thickness),
-        segment_flanges.axial_thickness,
-        segment_flanges.axial_thickness,
-        &generator.flange_fasteners,
-    )?
-    .into_iter()
-    .map(|fastener| ManifoldSolid(fastener.cutter))
-    .collect();
+        &ranges,
+        &tiles,
+        base_fastener_band,
+        &base_fastener_holes,
+        generator.flange_fasteners.head_diameter,
+        WingBaseRegistrationSettings::default(),
+    )?);
+    validate_cutters_intersect_pair(
+        &kernel,
+        &base_mold_flange,
+        &base_sealing_profile_blank,
+        inserts[base_insert_start..]
+            .iter()
+            .map(|insert| &insert.solid),
+        "base registration fixture",
+    )?;
     validate_disjoint(
         &kernel,
         edge_fastener_holes.iter().map(|hole| &hole.solid),
@@ -331,11 +358,11 @@ fn generate(generator: WingMoldGenerator) -> Result<(), Box<dyn std::error::Erro
     )?;
     validate_disjoint(
         &kernel,
-        base_fastener_cutters.iter(),
+        base_fastener_holes.iter().map(|hole| &hole.solid),
         inserts[base_insert_start..].iter(),
         "base fastener hole overlaps a registration fixture",
     )?;
-    for cutter in &base_fastener_cutters {
+    for cutter in base_fastener_holes.iter().map(|hole| &hole.solid) {
         cut_required(
             &kernel,
             &mut base_mold_flange,
@@ -349,7 +376,11 @@ fn generate(generator: WingMoldGenerator) -> Result<(), Box<dyn std::error::Erro
             "base sealing flange through hole",
         )?;
     }
-    println!("placed {} registration inserts", inserts.len());
+    println!(
+        "placed {} registration inserts ({} base)",
+        inserts.len(),
+        inserts.len() - base_insert_start
+    );
     let socket_cutters: Vec<&ManifoldSolid> = inserts
         .iter()
         .map(|insert| &insert.solid)
@@ -861,6 +892,66 @@ fn build_registration_inserts(
     Ok(inserts)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn build_base_registration_inserts(
+    spec: &WingSpec,
+    root_span: f64,
+    ranges: &[(f64, f64)],
+    tiles: &[PrintTile],
+    band: FlangeFastenerBand,
+    fastener_holes: &[BaseFastenerHole],
+    fastener_head_diameter: f64,
+    settings: WingBaseRegistrationSettings,
+) -> Result<Vec<RegistrationInsert>, Box<dyn std::error::Error>> {
+    let root_range = ranges.first().ok_or("mold has no root segment")?;
+    let root_tiles: Vec<&PrintTile> = tiles
+        .iter()
+        .filter(|tile| tile.span == *root_range)
+        .collect();
+    if root_tiles.is_empty() {
+        return Err("mold has no root tiles".into());
+    }
+
+    let mut inserts = Vec::with_capacity(root_tiles.len() * 2 * settings.fixtures_per_flange);
+    for (tile_index, tile) in root_tiles.into_iter().enumerate() {
+        for surface in [WingSurface::Lower, WingSurface::Upper] {
+            let fastener_positions: Vec<f64> = fastener_holes
+                .iter()
+                .filter(|hole| hole.surface == surface)
+                .map(|hole| hole.chord_fraction)
+                .collect();
+            let fixtures = wing_base_registration_inserts(
+                spec,
+                root_span,
+                surface,
+                tile.chord,
+                band,
+                &fastener_positions,
+                fastener_head_diameter,
+                settings,
+            )?;
+            let side = match surface {
+                WingSurface::Lower => "lower",
+                WingSurface::Upper => "upper",
+            };
+            inserts.extend(
+                fixtures
+                    .into_iter()
+                    .enumerate()
+                    .map(|(fixture_index, solid)| RegistrationInsert {
+                        name: format!(
+                            "registration-insert-base-{side}-c{:02}-{:02}",
+                            tile_index + 1,
+                            fixture_index + 1
+                        ),
+                        solid: ManifoldSolid(solid),
+                    }),
+            );
+        }
+    }
+    Ok(inserts)
+}
+
 fn validate_cutters_intersect_pair<'a, I>(
     kernel: &ManifoldKernel,
     first: &ManifoldSolid,
@@ -977,13 +1068,6 @@ const fn edge_name(edge: FlangeEdge) -> &'static str {
     }
 }
 
-const fn wing_edge_name(edge: WingEdge) -> &'static str {
-    match edge {
-        WingEdge::Leading => "leading",
-        WingEdge::Trailing => "trailing",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1016,6 +1100,76 @@ mod tests {
         assert_eq!(
             longitudinal_flange_end_obstructions(2, 3, 12.0),
             FlangeEndObstructions::default()
+        );
+    }
+
+    #[test]
+    fn gull_root_gets_two_registration_fixtures_per_constituent_flange() {
+        let spec = mold_wing_geometry::preset("gull").unwrap();
+        let fasteners = WingFlangeFastenerSpec::default();
+        let band = FlangeFastenerBand {
+            inner_margin: 4.0,
+            outer_margin: 14.4,
+        };
+        let fastener_holes: Vec<BaseFastenerHole> = transverse_through_flange_fastener_cutters(
+            &spec,
+            0.0,
+            band.inner_margin,
+            band.outer_margin,
+            3.0,
+            3.0,
+            &fasteners,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|fastener| BaseFastenerHole {
+            surface: fastener.surface,
+            chord_fraction: fastener.chord_fraction,
+            solid: ManifoldSolid(fastener.cutter),
+        })
+        .collect();
+        let ranges = [(0.0, 216.0), (216.0, 400.0)];
+        let tiles = [
+            PrintTile {
+                span: ranges[0],
+                chord: (0.0, 0.5),
+            },
+            PrintTile {
+                span: ranges[0],
+                chord: (0.5, 1.0),
+            },
+            PrintTile {
+                span: ranges[1],
+                chord: (0.0, 1.0),
+            },
+        ];
+
+        let inserts = build_base_registration_inserts(
+            &spec,
+            0.0,
+            &ranges,
+            &tiles,
+            band,
+            &fastener_holes,
+            fasteners.head_diameter,
+            WingBaseRegistrationSettings::default(),
+        )
+        .unwrap();
+
+        assert_eq!(inserts.len(), 8);
+        assert_eq!(
+            inserts
+                .iter()
+                .filter(|insert| insert.name.contains("-lower-"))
+                .count(),
+            4
+        );
+        assert_eq!(
+            inserts
+                .iter()
+                .filter(|insert| insert.name.contains("-upper-"))
+                .count(),
+            4
         );
     }
 

@@ -2,10 +2,12 @@ use std::{fmt, fs::File, io::BufWriter, path::Path};
 
 use manifold_rust::{manifold::Manifold, types::MeshGL64};
 
+mod base_registration;
 mod flange_fasteners;
 mod panel_rivets;
 mod surface_frame;
 
+pub use base_registration::{WingBaseRegistrationSettings, wing_base_registration_inserts};
 pub use flange_fasteners::{
     FlangeEndObstructions, FlangeFastenerBand, LongitudinalEdgeFastenerCutter,
     LongitudinalSplitFlangeFastenerCutter, TransverseFlangeFastenerCutters,
@@ -94,34 +96,15 @@ pub struct PrintableEnvelope {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct WingBaseRegistrationSettings {
-    pub radial_half_width: f64,
-    pub tangent_half_width: f64,
-    pub span_half_depth: f64,
-}
-
-impl Default for WingBaseRegistrationSettings {
-    fn default() -> Self {
-        Self {
-            radial_half_width: 5.0,
-            tangent_half_width: 5.0,
-            span_half_depth: 2.25,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WingBaseAttachmentSettings {
     pub flange_width: f64,
     pub axial_thickness: f64,
-    pub registration: WingBaseRegistrationSettings,
 }
 
 pub struct WingBaseAttachmentGeometry {
     pub opening: Manifold,
     pub mold_flange: Manifold,
     pub sealing_profile: Manifold,
-    pub registration: [(WingEdge, Manifold); 2],
 }
 
 pub fn wing_segment_boundaries(
@@ -822,65 +805,6 @@ pub fn registration_diamond(
     checked_mesh(mesh, "registration diamond")
 }
 
-/// A diamond registration insert crossing a transverse, bed-oriented flange.
-/// The insert is centered in the external flange band at the requested wing
-/// edge and extends equally to either side of `center_span`.
-#[allow(clippy::too_many_arguments)]
-pub fn transverse_registration_diamond(
-    spec: &WingSpec,
-    edge: WingEdge,
-    center_span: f64,
-    flange_margin: f64,
-    radial_half_width: f64,
-    tangent_half_width: f64,
-    span_half_depth: f64,
-) -> Result<Manifold, WingError> {
-    if ![
-        center_span,
-        flange_margin,
-        radial_half_width,
-        tangent_half_width,
-        span_half_depth,
-    ]
-    .into_iter()
-    .all(f64::is_finite)
-        || flange_margin <= 0.0
-        || radial_half_width <= 0.0
-        || tangent_half_width <= 0.0
-        || span_half_depth <= 0.0
-    {
-        return Err(WingError::InvalidSpec(
-            "transverse registration dimensions must be finite and positive",
-        ));
-    }
-    let center = interpolate_station_extended(spec, center_span)?;
-    let center_x = match edge {
-        WingEdge::Leading => -flange_margin * 0.5,
-        WingEdge::Trailing => center.chord + flange_margin * 0.5,
-    };
-    let diamond = [
-        [center_x - radial_half_width, 0.0],
-        [center_x, tangent_half_width],
-        [center_x + radial_half_width, 0.0],
-        [center_x, -tangent_half_width],
-    ];
-    let mut mesh = MeshGL64 {
-        num_prop: 3,
-        ..Default::default()
-    };
-    for span in [center_span - span_half_depth, center_span + span_half_depth] {
-        let station = interpolate_station_extended(spec, span)?;
-        for [x, z] in diamond {
-            mesh.vert_properties
-                .extend(transform_station(&station, x, z));
-        }
-    }
-    connect_quad_rings(&mut mesh, 0, 4);
-    mesh.tri_verts.extend([0, 2, 1, 0, 3, 2]);
-    mesh.tri_verts.extend([4, 5, 6, 4, 6, 7]);
-    checked_mesh(mesh, "transverse registration diamond")
-}
-
 pub fn wing_base_attachment_geometry(
     spec: &WingSpec,
     wing: &Manifold,
@@ -930,30 +854,12 @@ pub fn wing_base_attachment_geometry(
             (root_span, settings.flange_width),
         ],
     )?;
-    let registration = |edge| -> Result<(WingEdge, Manifold), WingError> {
-        Ok((
-            edge,
-            transverse_registration_diamond(
-                spec,
-                edge,
-                root_span,
-                settings.flange_width,
-                settings.registration.radial_half_width,
-                settings.registration.tangent_half_width,
-                settings.registration.span_half_depth,
-            )?,
-        ))
-    };
     let mold_flange = flange_outer.difference(wing).difference(&opening);
 
     Ok(WingBaseAttachmentGeometry {
         opening,
         mold_flange,
         sealing_profile,
-        registration: [
-            registration(WingEdge::Leading)?,
-            registration(WingEdge::Trailing)?,
-        ],
     })
 }
 
@@ -1612,20 +1518,6 @@ mod tests {
     }
 
     #[test]
-    fn transverse_registration_crosses_the_root_attachment_plane() {
-        let spec = preset("gull").unwrap();
-        let insert =
-            transverse_registration_diamond(&spec, WingEdge::Leading, -3.0, 12.0, 5.0, 5.0, 2.25)
-                .unwrap();
-        let bounds = insert.bounding_box();
-
-        assert!(bounds.min.y < -3.0);
-        assert!(bounds.max.y > -3.0);
-        assert!(bounds.max.x < 0.0);
-        assert!(!insert.is_empty());
-    }
-
-    #[test]
     fn base_sealing_profile_and_root_flange_meet_at_the_wing_root() {
         let spec = preset("gull").unwrap();
         let part = generate(&spec).unwrap();
@@ -1635,21 +1527,11 @@ mod tests {
             WingBaseAttachmentSettings {
                 flange_width: 12.0,
                 axial_thickness: 3.0,
-                registration: WingBaseRegistrationSettings::default(),
             },
         )
         .unwrap();
-        let mut flange = geometry.mold_flange;
-        let mut seal = geometry.sealing_profile;
-
-        for (_, insert) in geometry.registration {
-            assert!(flange.intersection(&insert).volume() > 1.0e-6);
-            assert!(seal.intersection(&insert).volume() > 1.0e-6);
-            flange = flange.difference(&insert);
-            seal = seal.difference(&insert);
-            assert!(flange.intersection(&insert).volume() < 1.0e-6);
-            assert!(seal.intersection(&insert).volume() < 1.0e-6);
-        }
+        let flange = geometry.mold_flange;
+        let seal = geometry.sealing_profile;
 
         assert!(flange.intersection(&geometry.opening).volume() < 1.0e-6);
         assert!(flange.intersection(&part).volume() < 1.0e-6);
@@ -1667,7 +1549,6 @@ mod tests {
             WingBaseAttachmentSettings {
                 flange_width: 14.4,
                 axial_thickness: 3.0,
-                registration: WingBaseRegistrationSettings::default(),
             },
         )
         .unwrap();
