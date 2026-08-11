@@ -16,14 +16,16 @@ use mold_shell::{
 };
 use mold_wing_geometry::{
     FlangeEndObstructions, FlangeFastenerBand, PrintableEnvelope, WingBaseAttachmentSettings,
-    WingBaseRegistrationSettings, WingEdge, WingFlangeFastenerSpec, WingPanelRivetSpec, WingSpec,
-    WingSurface, chord_region_extended, chord_region_with_span_margins,
-    longitudinal_edge_fastener_cutters, longitudinal_split_flange_fastener_cutters,
+    WingEdge, WingFlangeFastenerSpec, WingLongitudinalRegistrationSettings, WingPanelRivetSpec,
+    WingSpec, WingSurface, WingTransverseRegistrationSettings, chord_region_extended,
+    chord_region_with_span_margins, longitudinal_edge_fastener_cutters,
+    longitudinal_split_flange_fastener_cutters, longitudinal_split_flange_registration_inserts,
     panel_rivet_heads, printable_tile_dimensions, registration_diamond,
     sample_longitudinal_surface_path, sampled_chord_band_region, segment_normal,
-    transverse_flange_blank, transverse_flange_fastener_cutters, transverse_section_normal,
+    transverse_flange_blank, transverse_flange_fastener_cutters,
+    transverse_flange_registration_inserts, transverse_section_normal,
     transverse_through_flange_fastener_cutters, wing_base_attachment_geometry,
-    wing_base_registration_inserts, wing_segment_boundaries,
+    wing_segment_boundaries,
 };
 
 const FLANGE_MARGIN: f64 = 12.0;
@@ -70,6 +72,13 @@ impl Default for RegistrationSettings {
 struct RegistrationInsert {
     name: String,
     solid: ManifoldSolid,
+    mating: Option<RegistrationMating>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RegistrationMating {
+    surface: WingSurface,
+    tile_indices: [usize; 2],
 }
 
 struct EdgeFastenerHole {
@@ -330,6 +339,26 @@ fn generate(generator: WingMoldGenerator) -> Result<(), Box<dyn std::error::Erro
         generator.flange_fasteners.head_diameter,
         registration,
     )?;
+    let segment_insert_start = inserts.len();
+    inserts.extend(build_transverse_join_registration_inserts(
+        &spec,
+        &ranges,
+        &tiles,
+        base_fastener_band,
+        segment_flanges,
+        shell_settings.thickness,
+        &generator.flange_fasteners,
+        WingTransverseRegistrationSettings::default(),
+    )?);
+    inserts.extend(build_longitudinal_join_registration_inserts(
+        &spec,
+        &ranges,
+        &tiles,
+        base_fastener_band,
+        segment_flanges,
+        &generator.flange_fasteners,
+        WingLongitudinalRegistrationSettings::default(),
+    )?);
     let base_insert_start = inserts.len();
     inserts.extend(build_base_registration_inserts(
         &spec,
@@ -339,7 +368,7 @@ fn generate(generator: WingMoldGenerator) -> Result<(), Box<dyn std::error::Erro
         base_fastener_band,
         &base_fastener_holes,
         generator.flange_fasteners.head_diameter,
-        WingBaseRegistrationSettings::default(),
+        WingTransverseRegistrationSettings::default(),
     )?);
     validate_cutters_intersect_pair(
         &kernel,
@@ -377,13 +406,19 @@ fn generate(generator: WingMoldGenerator) -> Result<(), Box<dyn std::error::Erro
         )?;
     }
     println!(
-        "placed {} registration inserts ({} base)",
+        "placed {} registration inserts ({} segment join, {} base)",
         inserts.len(),
+        base_insert_start - segment_insert_start,
         inserts.len() - base_insert_start
     );
-    let socket_cutters: Vec<&ManifoldSolid> = inserts
+    let socket_cutters: Vec<&ManifoldSolid> = inserts[..segment_insert_start]
         .iter()
         .map(|insert| &insert.solid)
+        .chain(
+            inserts[base_insert_start..]
+                .iter()
+                .map(|insert| &insert.solid),
+        )
         .chain(edge_fastener_holes.iter().map(|hole| &hole.solid))
         .collect();
     let base_socket_cutters: Vec<&ManifoldSolid> = inserts[base_insert_start..]
@@ -436,7 +471,12 @@ fn generate(generator: WingMoldGenerator) -> Result<(), Box<dyn std::error::Erro
     if let Some(heads) = &rivet_heads {
         cut_surface_details(&kernel, &mut mold, heads)?;
     }
-    let mold = split_mold_into_tiles(&kernel, &spec, mold, &ranges, &tiles)?;
+    let mut mold = split_mold_into_tiles(&kernel, &spec, mold, &ranges, &tiles)?;
+    cut_registration_mating_sockets(
+        &kernel,
+        &mut mold,
+        &inserts[segment_insert_start..base_insert_start],
+    )?;
     validate_no_part_intrusion(&part, &mold)?;
     validate_root_alignment(&kernel, &part, &mold, &base_sealing_profile)?;
     export_artifacts(
@@ -720,6 +760,33 @@ fn cut_required(
     Ok(())
 }
 
+fn cut_registration_mating_sockets(
+    kernel: &ManifoldKernel,
+    mold: &mut SectionedTwoPartMold<ManifoldSolid>,
+    inserts: &[RegistrationInsert],
+) -> Result<(), Box<dyn std::error::Error>> {
+    for insert in inserts {
+        let mating = insert
+            .mating
+            .ok_or("segment registration fixture is missing its mating tiles")?;
+        if mating.tile_indices[0] == mating.tile_indices[1] {
+            return Err("segment registration fixture targets the same tile twice".into());
+        }
+        let pieces = match mating.surface {
+            WingSurface::Lower => &mut mold.negative,
+            WingSurface::Upper => &mut mold.positive,
+        };
+        let label = format!("{} socket", insert.name);
+        for tile_index in mating.tile_indices {
+            let piece = pieces
+                .get_mut(tile_index)
+                .ok_or("segment registration fixture targets a missing tile")?;
+            cut_required(kernel, piece, &insert.solid, &label)?;
+        }
+    }
+    Ok(())
+}
+
 fn add_scaled(point: [f64; 3], direction: [f64; 3], distance: f64) -> [f64; 3] {
     [
         point[0] + direction[0] * distance,
@@ -885,7 +952,209 @@ fn build_registration_inserts(
                         fixture.span_half_width,
                         fixture.normal_half_depth,
                     )?),
+                    mating: None,
                 });
+            }
+        }
+    }
+    Ok(inserts)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_transverse_join_registration_inserts(
+    spec: &WingSpec,
+    ranges: &[(f64, f64)],
+    tiles: &[PrintTile],
+    band: FlangeFastenerBand,
+    flange_settings: SegmentFlangeSettings,
+    shell_thickness: f64,
+    fasteners: &WingFlangeFastenerSpec,
+    settings: WingTransverseRegistrationSettings,
+) -> Result<Vec<RegistrationInsert>, Box<dyn std::error::Error>> {
+    let mut inserts = Vec::new();
+    for seam in 0..ranges.len().saturating_sub(1) {
+        let span = ranges[seam].1;
+        let fastener_cutters = transverse_flange_fastener_cutters(
+            spec,
+            span,
+            shell_thickness,
+            band.outer_margin,
+            flange_settings.top_ramp_length(),
+            flange_settings.axial_thickness,
+            fasteners,
+        )?;
+        let chord_ranges = transverse_join_chord_ranges(ranges, tiles, seam)?;
+        for (chord_index, chord_range) in chord_ranges.into_iter().enumerate() {
+            let chord_midpoint = (chord_range.0 + chord_range.1) * 0.5;
+            let tile_indices = [
+                tile_index_at(tiles, ranges[seam], chord_midpoint)?,
+                tile_index_at(tiles, ranges[seam + 1], chord_midpoint)?,
+            ];
+            for surface in [WingSurface::Lower, WingSurface::Upper] {
+                let fastener_positions: Vec<f64> = fastener_cutters
+                    .iter()
+                    .filter(|cutter| cutter.surface == surface)
+                    .map(|cutter| cutter.chord_fraction)
+                    .collect();
+                let fixtures = transverse_flange_registration_inserts(
+                    spec,
+                    span,
+                    surface,
+                    chord_range,
+                    band,
+                    &fastener_positions,
+                    fasteners.head_diameter,
+                    settings,
+                )?;
+                let side = wing_surface_name(surface);
+                inserts.extend(
+                    fixtures
+                        .into_iter()
+                        .enumerate()
+                        .map(|(fixture_index, solid)| RegistrationInsert {
+                            name: format!(
+                                "registration-insert-transverse-s{:02}-{side}-c{:02}-{:02}",
+                                seam + 1,
+                                chord_index + 1,
+                                fixture_index + 1
+                            ),
+                            solid: ManifoldSolid(solid),
+                            mating: Some(RegistrationMating {
+                                surface,
+                                tile_indices,
+                            }),
+                        }),
+                );
+            }
+        }
+    }
+    Ok(inserts)
+}
+
+fn tile_index_at(
+    tiles: &[PrintTile],
+    span: (f64, f64),
+    chord_fraction: f64,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    tiles
+        .iter()
+        .position(|tile| {
+            tile.span == span
+                && chord_fraction > tile.chord.0 - 1.0e-9
+                && chord_fraction < tile.chord.1 + 1.0e-9
+        })
+        .ok_or_else(|| "registration position does not belong to a print tile".into())
+}
+
+fn transverse_join_chord_ranges(
+    ranges: &[(f64, f64)],
+    tiles: &[PrintTile],
+    seam: usize,
+) -> Result<Vec<(f64, f64)>, Box<dyn std::error::Error>> {
+    let adjoining = ranges
+        .get(seam..=seam + 1)
+        .ok_or("transverse join has no adjoining span ranges")?;
+    let mut boundaries = vec![0.0, 1.0];
+    for range in adjoining {
+        let section_tiles: Vec<&PrintTile> =
+            tiles.iter().filter(|tile| tile.span == *range).collect();
+        if section_tiles.is_empty() {
+            return Err("transverse join has an adjoining span range without tiles".into());
+        }
+        for tile in section_tiles {
+            boundaries.extend([tile.chord.0, tile.chord.1]);
+        }
+    }
+    boundaries.sort_by(f64::total_cmp);
+    boundaries.dedup_by(|a, b| (*a - *b).abs() < 1.0e-9);
+    Ok(boundaries
+        .windows(2)
+        .filter(|pair| pair[1] - pair[0] > 1.0e-9)
+        .map(|pair| (pair[0], pair[1]))
+        .collect())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_longitudinal_join_registration_inserts(
+    spec: &WingSpec,
+    ranges: &[(f64, f64)],
+    tiles: &[PrintTile],
+    band: FlangeFastenerBand,
+    flange_settings: SegmentFlangeSettings,
+    fasteners: &WingFlangeFastenerSpec,
+    settings: WingLongitudinalRegistrationSettings,
+) -> Result<Vec<RegistrationInsert>, Box<dyn std::error::Error>> {
+    let model_start = spec.stations.first().ok_or("wing has no stations")?.span;
+    let model_end = spec.stations.last().ok_or("wing has no stations")?.span;
+    let mut inserts = Vec::new();
+    for (section, range) in ranges.iter().enumerate() {
+        let section_tiles: Vec<&PrintTile> =
+            tiles.iter().filter(|tile| tile.span == *range).collect();
+        for (chord_index, pair) in section_tiles.windows(2).enumerate() {
+            let tile_indices = [
+                tiles
+                    .iter()
+                    .position(|tile| std::ptr::eq(tile, pair[0]))
+                    .ok_or("longitudinal registration is missing its leading tile")?,
+                tiles
+                    .iter()
+                    .position(|tile| std::ptr::eq(tile, pair[1]))
+                    .ok_or("longitudinal registration is missing its trailing tile")?,
+            ];
+            let chord_fraction = pair[0].chord.1;
+            let end_obstructions = longitudinal_flange_end_obstructions(
+                section,
+                ranges.len(),
+                flange_settings.top_ramp_length(),
+            );
+            let upper_direction =
+                segment_normal(spec, range.0.max(model_start), range.1.min(model_end))?;
+            for (surface, direction) in [
+                (WingSurface::Lower, upper_direction.map(|value| -value)),
+                (WingSurface::Upper, upper_direction),
+            ] {
+                let cutters = longitudinal_split_flange_fastener_cutters(
+                    spec,
+                    chord_fraction,
+                    *range,
+                    surface,
+                    direction,
+                    band,
+                    flange_settings.axial_thickness,
+                    end_obstructions,
+                    fasteners,
+                )?;
+                let positions: Vec<f64> = cutters.iter().map(|cutter| cutter.position).collect();
+                let fixtures = longitudinal_split_flange_registration_inserts(
+                    spec,
+                    chord_fraction,
+                    *range,
+                    surface,
+                    direction,
+                    band,
+                    &positions,
+                    fasteners.head_diameter,
+                    settings,
+                )?;
+                let side = wing_surface_name(surface);
+                inserts.extend(
+                    fixtures
+                        .into_iter()
+                        .enumerate()
+                        .map(|(fixture_index, solid)| RegistrationInsert {
+                            name: format!(
+                                "registration-insert-longitudinal-s{:02}-{side}-c{:02}-{:02}",
+                                section + 1,
+                                chord_index + 1,
+                                fixture_index + 1
+                            ),
+                            solid: ManifoldSolid(solid),
+                            mating: Some(RegistrationMating {
+                                surface,
+                                tile_indices,
+                            }),
+                        }),
+                );
             }
         }
     }
@@ -901,7 +1170,7 @@ fn build_base_registration_inserts(
     band: FlangeFastenerBand,
     fastener_holes: &[BaseFastenerHole],
     fastener_head_diameter: f64,
-    settings: WingBaseRegistrationSettings,
+    settings: WingTransverseRegistrationSettings,
 ) -> Result<Vec<RegistrationInsert>, Box<dyn std::error::Error>> {
     let root_range = ranges.first().ok_or("mold has no root segment")?;
     let root_tiles: Vec<&PrintTile> = tiles
@@ -920,7 +1189,7 @@ fn build_base_registration_inserts(
                 .filter(|hole| hole.surface == surface)
                 .map(|hole| hole.chord_fraction)
                 .collect();
-            let fixtures = wing_base_registration_inserts(
+            let fixtures = transverse_flange_registration_inserts(
                 spec,
                 root_span,
                 surface,
@@ -930,10 +1199,7 @@ fn build_base_registration_inserts(
                 fastener_head_diameter,
                 settings,
             )?;
-            let side = match surface {
-                WingSurface::Lower => "lower",
-                WingSurface::Upper => "upper",
-            };
+            let side = wing_surface_name(surface);
             inserts.extend(
                 fixtures
                     .into_iter()
@@ -945,6 +1211,7 @@ fn build_base_registration_inserts(
                             fixture_index + 1
                         ),
                         solid: ManifoldSolid(solid),
+                        mating: None,
                     }),
             );
         }
@@ -1068,6 +1335,13 @@ const fn edge_name(edge: FlangeEdge) -> &'static str {
     }
 }
 
+const fn wing_surface_name(surface: WingSurface) -> &'static str {
+    match surface {
+        WingSurface::Lower => "lower",
+        WingSurface::Upper => "upper",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1152,7 +1426,7 @@ mod tests {
             band,
             &fastener_holes,
             fasteners.head_diameter,
-            WingBaseRegistrationSettings::default(),
+            WingTransverseRegistrationSettings::default(),
         )
         .unwrap();
 
@@ -1171,6 +1445,74 @@ mod tests {
                 .count(),
             4
         );
+    }
+
+    #[test]
+    fn gull_segment_joins_get_registration_on_every_mating_flange() {
+        let spec = mold_wing_geometry::preset("gull").unwrap();
+        let ranges = [
+            (0.0, 216.0),
+            (216.0, 374.4827586206897),
+            (374.4827586206897, 549.2413793103448),
+            (549.2413793103448, 724.0),
+        ];
+        let tiles = [
+            PrintTile {
+                span: ranges[0],
+                chord: (0.0, 0.5),
+            },
+            PrintTile {
+                span: ranges[0],
+                chord: (0.5, 1.0),
+            },
+            PrintTile {
+                span: ranges[1],
+                chord: (0.0, 1.0),
+            },
+            PrintTile {
+                span: ranges[2],
+                chord: (0.0, 1.0),
+            },
+            PrintTile {
+                span: ranges[3],
+                chord: (0.0, 1.0),
+            },
+        ];
+        let band = FlangeFastenerBand {
+            inner_margin: 4.0,
+            outer_margin: 15.2,
+        };
+        let flange_settings = SegmentFlangeSettings::default();
+        let fasteners = WingFlangeFastenerSpec::default();
+
+        let transverse = build_transverse_join_registration_inserts(
+            &spec,
+            &ranges,
+            &tiles,
+            band,
+            flange_settings,
+            4.0,
+            &fasteners,
+            WingTransverseRegistrationSettings::default(),
+        )
+        .unwrap();
+        let longitudinal = build_longitudinal_join_registration_inserts(
+            &spec,
+            &ranges,
+            &tiles,
+            band,
+            flange_settings,
+            &fasteners,
+            WingLongitudinalRegistrationSettings::default(),
+        )
+        .unwrap();
+
+        assert_eq!(transverse.len(), 16);
+        assert_eq!(longitudinal.len(), 4);
+        for insert in transverse.iter().chain(&longitudinal) {
+            let mating = insert.mating.expect("segment insert needs mating tiles");
+            assert_ne!(mating.tile_indices[0], mating.tile_indices[1]);
+        }
     }
 
     #[test]

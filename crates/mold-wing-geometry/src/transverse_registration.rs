@@ -7,15 +7,15 @@ use crate::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct WingBaseRegistrationSettings {
-    /// Number of fixtures placed on each independently printable root flange.
+pub struct WingTransverseRegistrationSettings {
+    /// Number of fixtures placed on each independently printable flange constituent.
     pub fixtures_per_flange: usize,
     pub radial_half_width: f64,
     pub tangent_half_width: f64,
     pub span_half_depth: f64,
 }
 
-impl Default for WingBaseRegistrationSettings {
+impl Default for WingTransverseRegistrationSettings {
     fn default() -> Self {
         Self {
             fixtures_per_flange: 2,
@@ -26,13 +26,13 @@ impl Default for WingBaseRegistrationSettings {
     }
 }
 
-/// Places registration inserts on one constituent root flange.
+/// Places registration inserts on one constituent transverse flange.
 ///
-/// The chord range identifies one printable root tile and `surface` identifies
+/// The chord range identifies one printable chord region and `surface` identifies
 /// its lower or upper mold half. Each fixture is kept inside its share of the
 /// tile and clear of the supplied fastener heads.
 #[allow(clippy::too_many_arguments)]
-pub fn wing_base_registration_inserts(
+pub fn transverse_flange_registration_inserts(
     wing: &WingSpec,
     center_span: f64,
     surface: WingSurface,
@@ -40,7 +40,7 @@ pub fn wing_base_registration_inserts(
     band: FlangeFastenerBand,
     fastener_chord_fractions: &[f64],
     fastener_head_diameter: f64,
-    settings: WingBaseRegistrationSettings,
+    settings: WingTransverseRegistrationSettings,
 ) -> Result<Vec<Manifold>, WingError> {
     validate(
         center_span,
@@ -70,7 +70,7 @@ fn registration_chord_fractions(
     chord_range: (f64, f64),
     fastener_chord_fractions: &[f64],
     fastener_head_diameter: f64,
-    settings: WingBaseRegistrationSettings,
+    settings: WingTransverseRegistrationSettings,
 ) -> Result<Vec<f64>, WingError> {
     let footprint_half_width = settings.radial_half_width.max(settings.tangent_half_width);
     let tile_start = chord * chord_range.0;
@@ -78,7 +78,7 @@ fn registration_chord_fractions(
     let lane_width = (tile_end - tile_start) / settings.fixtures_per_flange as f64;
     if lane_width <= footprint_half_width * 2.0 {
         return Err(WingError::InvalidSpec(
-            "base flange tile is too narrow for its registration fixtures",
+            "transverse flange constituent is too narrow for its registration fixtures",
         ));
     }
 
@@ -102,7 +102,7 @@ fn registration_chord_fractions(
             .filter(|interval| interval_length(*interval) > 1.0e-6)
             .map(|interval| (interval.0 + interval.1) * 0.5)
             .ok_or(WingError::InvalidSpec(
-                "base flange has no registration position clear of its fasteners",
+                "transverse flange has no registration position clear of its fasteners",
             ))?;
         positions.push(position / chord);
     }
@@ -115,7 +115,7 @@ fn validate(
     band: FlangeFastenerBand,
     fastener_chord_fractions: &[f64],
     fastener_head_diameter: f64,
-    settings: WingBaseRegistrationSettings,
+    settings: WingTransverseRegistrationSettings,
 ) -> Result<(), WingError> {
     if ![
         center_span,
@@ -146,7 +146,7 @@ fn validate(
             .any(|fraction| !fraction.is_finite() || !(0.0..=1.0).contains(fraction))
     {
         return Err(WingError::InvalidSpec(
-            "base registration settings and flange range must be valid",
+            "transverse registration settings and flange range must be valid",
         ));
     }
     Ok(())
@@ -192,7 +192,7 @@ fn surface_registration_diamond(
     chord_fraction: f64,
     surface: WingSurface,
     band: FlangeFastenerBand,
-    settings: WingBaseRegistrationSettings,
+    settings: WingTransverseRegistrationSettings,
 ) -> Result<Manifold, WingError> {
     let frame = wing_surface_frame(wing, center_span, chord_fraction, surface)?;
     let seam_normal = transverse_section_normal(wing, center_span)?;
@@ -202,10 +202,10 @@ fn surface_registration_diamond(
         -dot(frame.outward_normal, seam_normal),
     ))
     .ok_or(WingError::InvalidSpec(
-        "cannot project base registration placement into the flange plane",
+        "cannot project transverse registration placement into the flange plane",
     ))?;
     let tangent = normalize_array(cross_array(radial, seam_normal)).ok_or(
-        WingError::InvalidSpec("cannot determine base registration tangent"),
+        WingError::InvalidSpec("cannot determine transverse registration tangent"),
     )?;
     let center = add_scaled(
         frame.point,
@@ -230,7 +230,7 @@ fn surface_registration_diamond(
     connect_quad_rings(&mut mesh, 0, 4);
     mesh.tri_verts.extend([0, 2, 1, 0, 3, 2]);
     mesh.tri_verts.extend([4, 5, 6, 4, 6, 7]);
-    checked_mesh(mesh, "base registration diamond")
+    checked_mesh(mesh, "transverse registration diamond")
 }
 
 #[cfg(test)]
@@ -258,7 +258,7 @@ mod tests {
         let cutters =
             transverse_through_flange_fastener_cutters(&wing, 0.0, 4.0, 14.4, 3.0, 3.0, &fasteners)
                 .unwrap();
-        let settings = WingBaseRegistrationSettings::default();
+        let settings = WingTransverseRegistrationSettings::default();
         let band = FlangeFastenerBand {
             inner_margin: 4.0,
             outer_margin: 14.4,
@@ -272,7 +272,7 @@ mod tests {
                     .filter(|cutter| cutter.surface == surface)
                     .map(|cutter| cutter.chord_fraction)
                     .collect();
-                let inserts = wing_base_registration_inserts(
+                let inserts = transverse_flange_registration_inserts(
                     &wing,
                     0.0,
                     surface,
@@ -321,7 +321,7 @@ mod tests {
     #[test]
     fn fixture_placement_fails_instead_of_silently_omitting_a_constituent_flange() {
         let wing = preset("rectangular").unwrap();
-        let result = wing_base_registration_inserts(
+        let result = transverse_flange_registration_inserts(
             &wing,
             0.0,
             WingSurface::Upper,
@@ -332,7 +332,7 @@ mod tests {
             },
             &[],
             6.0,
-            WingBaseRegistrationSettings::default(),
+            WingTransverseRegistrationSettings::default(),
         );
 
         assert!(matches!(result, Err(WingError::InvalidSpec(_))));

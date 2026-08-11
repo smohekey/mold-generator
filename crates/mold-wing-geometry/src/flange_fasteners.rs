@@ -76,6 +76,7 @@ pub type TransverseFlangeFastenerSpec = WingFlangeFastenerSpec;
 
 pub struct TransverseFlangeFastenerCutters {
     pub surface: WingSurface,
+    pub chord_fraction: f64,
     pub clearance: Manifold,
     pub pilot: Manifold,
 }
@@ -150,6 +151,7 @@ pub fn transverse_flange_fastener_cutters(
         let pilot_end = add_scaled(interface, seam_normal, -fasteners.pilot_depth);
         cutters.push(TransverseFlangeFastenerCutters {
             surface: placement.surface,
+            chord_fraction: placement.chord_fraction,
             clearance: oriented_cylinder(
                 clearance_start,
                 clearance_end,

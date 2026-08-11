@@ -2,12 +2,12 @@ use std::{fmt, fs::File, io::BufWriter, path::Path};
 
 use manifold_rust::{manifold::Manifold, types::MeshGL64};
 
-mod base_registration;
 mod flange_fasteners;
+mod longitudinal_registration;
 mod panel_rivets;
 mod surface_frame;
+mod transverse_registration;
 
-pub use base_registration::{WingBaseRegistrationSettings, wing_base_registration_inserts};
 pub use flange_fasteners::{
     FlangeEndObstructions, FlangeFastenerBand, LongitudinalEdgeFastenerCutter,
     LongitudinalSplitFlangeFastenerCutter, TransverseFlangeFastenerCutters,
@@ -16,8 +16,16 @@ pub use flange_fasteners::{
     longitudinal_edge_fastener_cutters, longitudinal_split_flange_fastener_cutters,
     transverse_flange_fastener_cutters, transverse_through_flange_fastener_cutters,
 };
+pub use longitudinal_registration::{
+    WingLongitudinalRegistrationSettings, longitudinal_split_flange_registration_inserts,
+};
 pub use panel_rivets::{WingPanelRivetSpec, panel_rivet_heads};
 pub use surface_frame::{WingSurfaceFrame, wing_surface_frame};
+pub use transverse_registration::{
+    WingTransverseRegistrationSettings, transverse_flange_registration_inserts,
+};
+pub type WingBaseRegistrationSettings = WingTransverseRegistrationSettings;
+pub use transverse_flange_registration_inserts as wing_base_registration_inserts;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Naca4 {
