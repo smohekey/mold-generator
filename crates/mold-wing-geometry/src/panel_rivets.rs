@@ -4,7 +4,7 @@ use manifold_rust::{
     types::{Error as ManifoldError, OpType},
 };
 
-use crate::{WingError, WingSpec, WingSurface, interpolate_station, surface_point};
+use crate::{WingError, WingSpec, WingSurface, wing_surface_frame};
 
 /// A normalized panel grid whose edges receive rows of spherical rivet heads.
 ///
@@ -111,7 +111,7 @@ pub fn panel_rivet_heads(
         for &span_fraction in &rivets.span_edges {
             let span = span_at(span_fraction);
             let path = sample_path(rivets.path_samples, |parameter| {
-                surface_sample(
+                sample_surface(
                     wing,
                     span,
                     lerp(rivets.chord_range.0, rivets.chord_range.1, parameter),
@@ -122,7 +122,7 @@ pub fn panel_rivet_heads(
         }
         for &chord_fraction in &rivets.chord_edges {
             let path = sample_path(rivets.path_samples, |parameter| {
-                surface_sample(
+                sample_surface(
                     wing,
                     span_at(lerp(rivets.span_range.0, rivets.span_range.1, parameter)),
                     chord_fraction,
@@ -168,48 +168,17 @@ fn sample_path(
         .collect()
 }
 
-fn surface_sample(
+fn sample_surface(
     wing: &WingSpec,
     span: f64,
     chord_fraction: f64,
     surface: WingSurface,
 ) -> Result<SurfaceSample, WingError> {
-    let first = wing
-        .stations
-        .first()
-        .ok_or(WingError::InvalidSpec("wing has no stations"))?
-        .span;
-    let last = wing
-        .stations
-        .last()
-        .ok_or(WingError::InvalidSpec("wing has no stations"))?
-        .span;
-    let span_step = ((last - first) * 1.0e-4).max(1.0e-4);
-    let chord_step = 1.0e-4;
-    let station = interpolate_station(wing, span)?;
-    let point = surface_point(wing, &station, station.chord * chord_fraction, surface)?;
-
-    let chord_before = (chord_fraction - chord_step).max(0.0);
-    let chord_after = (chord_fraction + chord_step).min(1.0);
-    let chord_tangent = subtract(
-        surface_point(wing, &station, station.chord * chord_after, surface)?,
-        surface_point(wing, &station, station.chord * chord_before, surface)?,
-    );
-    let span_before = (span - span_step).max(first);
-    let span_after = (span + span_step).min(last);
-    let before = interpolate_station(wing, span_before)?;
-    let after = interpolate_station(wing, span_after)?;
-    let span_tangent = subtract(
-        surface_point(wing, &after, after.chord * chord_fraction, surface)?,
-        surface_point(wing, &before, before.chord * chord_fraction, surface)?,
-    );
-    let mut normal = normalize(cross(chord_tangent, span_tangent)).ok_or(
-        WingError::InvalidSpec("cannot determine panel-rivet surface normal"),
-    )?;
-    if surface == WingSurface::Lower {
-        normal = normal.map(|value| -value);
-    }
-    Ok(SurfaceSample { point, normal })
+    let frame = wing_surface_frame(wing, span, chord_fraction, surface)?;
+    Ok(SurfaceSample {
+        point: frame.point,
+        normal: frame.outward_normal,
+    })
 }
 
 fn resample_path(path: &[SurfaceSample], spacing: f64) -> Vec<SurfaceSample> {
@@ -265,18 +234,6 @@ fn add_scaled(point: [f64; 3], direction: [f64; 3], distance: f64) -> [f64; 3] {
         point[0] + direction[0] * distance,
         point[1] + direction[1] * distance,
         point[2] + direction[2] * distance,
-    ]
-}
-
-fn subtract(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
     ]
 }
 

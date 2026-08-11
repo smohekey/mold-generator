@@ -15,11 +15,12 @@ use mold_shell::{
     split_with_cumulative_cutters,
 };
 use mold_wing_geometry::{
-    PrintableEnvelope, WingBaseAttachmentSettings, WingEdge, WingPanelRivetSpec, WingSpec,
-    WingSurface, chord_region_extended, chord_region_with_span_margins, panel_rivet_heads,
-    printable_tile_dimensions, registration_diamond, sample_longitudinal_surface_path,
-    sampled_chord_band_region, segment_normal, transverse_flange_blank, transverse_section_normal,
-    wing_base_attachment_geometry, wing_segment_boundaries,
+    PrintableEnvelope, TransverseFlangeFastenerSpec, WingBaseAttachmentSettings, WingEdge,
+    WingPanelRivetSpec, WingSpec, WingSurface, chord_region_extended,
+    chord_region_with_span_margins, panel_rivet_heads, printable_tile_dimensions,
+    registration_diamond, sample_longitudinal_surface_path, sampled_chord_band_region,
+    segment_normal, transverse_flange_blank, transverse_flange_fastener_cutters,
+    transverse_section_normal, wing_base_attachment_geometry, wing_segment_boundaries,
 };
 
 const FLANGE_MARGIN: f64 = 12.0;
@@ -92,6 +93,7 @@ pub struct WingMoldGenerator {
     model_scale: f64,
     profile_points: usize,
     panel_rivets: Option<WingPanelRivetSpec>,
+    flange_fasteners: TransverseFlangeFastenerSpec,
 }
 
 impl WingMoldGenerator {
@@ -109,6 +111,7 @@ impl WingMoldGenerator {
             model_scale: 1.0,
             profile_points: 24,
             panel_rivets: None,
+            flange_fasteners: TransverseFlangeFastenerSpec::default(),
         }
     }
 
@@ -124,6 +127,11 @@ impl WingMoldGenerator {
 
     pub fn with_panel_rivets(mut self, panel_rivets: WingPanelRivetSpec) -> Self {
         self.panel_rivets = Some(panel_rivets);
+        self
+    }
+
+    pub fn with_flange_fasteners(mut self, flange_fasteners: TransverseFlangeFastenerSpec) -> Self {
+        self.flange_fasteners = flange_fasteners;
         self
     }
 
@@ -325,6 +333,7 @@ fn generate(generator: WingMoldGenerator) -> Result<(), Box<dyn std::error::Erro
         &tiles,
         segment_flanges,
         shell_settings.thickness,
+        &generator.flange_fasteners,
         &socket_cutters,
     )?;
     if let Some(heads) = &rivet_heads {
@@ -414,6 +423,7 @@ fn add_segment_join_flanges(
     tiles: &[PrintTile],
     settings: SegmentFlangeSettings,
     shell_thickness: f64,
+    fasteners: &TransverseFlangeFastenerSpec,
     exclusions: &[&ManifoldSolid],
 ) -> Result<(), Box<dyn std::error::Error>> {
     if !shell_thickness.is_finite()
@@ -464,6 +474,33 @@ fn add_segment_join_flanges(
         ] {
             attach(&mut pieces[seam], top_blank.clone(), region)?;
             attach(&mut pieces[seam + 1], bed_blank.clone(), region)?;
+        }
+        let fastener_cutters = transverse_flange_fastener_cutters(
+            spec,
+            span,
+            shell_thickness,
+            lateral_flange_margin,
+            ramp,
+            settings.axial_thickness,
+            fasteners,
+        )?;
+        for cutters in fastener_cutters {
+            let pieces = match cutters.surface {
+                WingSurface::Lower => &mut mold.negative,
+                WingSurface::Upper => &mut mold.positive,
+            };
+            cut_required(
+                kernel,
+                &mut pieces[seam],
+                &ManifoldSolid(cutters.pilot),
+                "blind pilot",
+            )?;
+            cut_required(
+                kernel,
+                &mut pieces[seam + 1],
+                &ManifoldSolid(cutters.clearance),
+                "bed clearance",
+            )?;
         }
     }
 
@@ -522,6 +559,19 @@ fn add_segment_join_flanges(
             *piece = kernel.difference(piece, exclusion)?;
         }
     }
+    Ok(())
+}
+
+fn cut_required(
+    kernel: &ManifoldKernel,
+    piece: &mut ManifoldSolid,
+    cutter: &ManifoldSolid,
+    label: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if kernel.intersection(piece, cutter)?.0.volume() <= 1.0e-9 {
+        return Err(format!("{label} cutter does not intersect its flange").into());
+    }
+    *piece = kernel.difference(piece, cutter)?;
     Ok(())
 }
 

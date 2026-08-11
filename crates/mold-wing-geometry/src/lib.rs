@@ -2,9 +2,16 @@ use std::{fmt, fs::File, io::BufWriter, path::Path};
 
 use manifold_rust::{manifold::Manifold, types::MeshGL64};
 
+mod flange_fasteners;
 mod panel_rivets;
+mod surface_frame;
 
+pub use flange_fasteners::{
+    TransverseFlangeFastenerCutters, TransverseFlangeFastenerSpec,
+    transverse_flange_fastener_cutters,
+};
 pub use panel_rivets::{WingPanelRivetSpec, panel_rivet_heads};
+pub use surface_frame::{WingSurfaceFrame, wing_surface_frame};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Naca4 {
