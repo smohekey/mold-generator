@@ -893,11 +893,17 @@ pub fn wing_base_attachment_geometry(
     }
 
     let flange_end = attachment_span + settings.axial_thickness;
-    // Extend the opening cutter through the mating face so the spanwise cap of
-    // any parting flange cannot survive as a coincident chordwise seam.
+    // Extend the opening cutter beyond both ends of the base flange so neither
+    // its mating face nor the wing-root transition can retain a coincident
+    // chordwise cap.
     let opening = transverse_profile_blank(
         spec,
-        &[attachment_span - settings.axial_thickness, model_start],
+        &[
+            attachment_span - settings.axial_thickness,
+            attachment_span,
+            model_start,
+            model_start + settings.axial_thickness,
+        ],
     )?;
     let flange_core = transverse_profile_blank(spec, &[attachment_span, flange_end])?;
     let flange_outer = transverse_flange_blank(
@@ -1614,7 +1620,7 @@ mod tests {
     }
 
     #[test]
-    fn base_opening_cutter_crosses_the_attachment_plane() {
+    fn base_opening_cutter_crosses_both_flange_ends() {
         let spec = preset("gull").unwrap();
         let geometry = wing_base_attachment_geometry(
             &spec,
@@ -1629,7 +1635,8 @@ mod tests {
         let bounds = geometry.opening.bounding_box();
 
         assert!((bounds.min.y + 6.0).abs() < 1.0e-9);
-        assert!((bounds.max.y - 0.0).abs() < 1.0e-9);
+        assert!((bounds.max.y - 3.0).abs() < 1.0e-9);
         assert!(bounds.min.y < -3.0 && bounds.max.y > -3.0);
+        assert!(bounds.min.y < 0.0 && bounds.max.y > 0.0);
     }
 }
