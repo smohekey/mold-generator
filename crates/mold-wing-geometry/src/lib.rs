@@ -7,8 +7,11 @@ mod panel_rivets;
 mod surface_frame;
 
 pub use flange_fasteners::{
+    LongitudinalEdgeFastenerCutter, LongitudinalSplitFlangeFastenerCutter,
     TransverseFlangeFastenerCutters, TransverseFlangeFastenerLayout, TransverseFlangeFastenerSpec,
-    transverse_flange_fastener_cutters,
+    TransverseThroughFlangeFastenerCutter, WingFlangeFastenerLayout, WingFlangeFastenerSpec,
+    longitudinal_edge_fastener_cutters, longitudinal_split_flange_fastener_cutters,
+    transverse_flange_fastener_cutters, transverse_through_flange_fastener_cutters,
 };
 pub use panel_rivets::{WingPanelRivetSpec, panel_rivet_heads};
 pub use surface_frame::{WingSurfaceFrame, wing_surface_frame};

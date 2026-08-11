@@ -6,23 +6,24 @@ use manifold_rust::{
 use mold_geometry::EndAnchoredDistribution;
 
 use crate::{
-    WingError, WingSpec, WingSurface, add_scaled, cross_array, dot, interpolate_station,
-    normalize_array, subtract, transverse_section_normal, wing_surface_frame,
+    WingEdge, WingError, WingSpec, WingSurface, add_scaled, cross_array, dot, flange_normal,
+    interpolate_station, interpolate_station_extended, normalize_array, subtract,
+    transform_station, transverse_section_normal, wing_surface_frame,
 };
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum TransverseFlangeFastenerLayout {
-    /// Anchor fasteners near both ends of the local seam chord, then distribute
-    /// interior fasteners evenly so no spacing exceeds this distance.
-    MaximumChordSpacing(f64),
-    /// Place fasteners at explicit normalized positions from leading to trailing edge.
-    ChordFractions(Vec<f64>),
+pub enum WingFlangeFastenerLayout {
+    /// Anchor fasteners near both ends, then distribute interior fasteners
+    /// evenly so no spacing exceeds this distance.
+    MaximumSpacing(f64),
+    /// Place fasteners at explicit normalized positions along each flange.
+    Fractions(Vec<f64>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct TransverseFlangeFastenerSpec {
-    /// Chordwise layout applied independently at every transverse seam.
-    pub layout: TransverseFlangeFastenerLayout,
+pub struct WingFlangeFastenerSpec {
+    /// Layout applied independently along every mating flange pair.
+    pub layout: WingFlangeFastenerLayout,
     /// Screw-head diameter used to keep end fasteners two head diameters from each end.
     pub head_diameter: f64,
     pub clearance_diameter: f64,
@@ -32,10 +33,10 @@ pub struct TransverseFlangeFastenerSpec {
     pub circular_segments: i32,
 }
 
-impl Default for TransverseFlangeFastenerSpec {
+impl Default for WingFlangeFastenerSpec {
     fn default() -> Self {
         Self {
-            layout: TransverseFlangeFastenerLayout::MaximumChordSpacing(100.0),
+            layout: WingFlangeFastenerLayout::MaximumSpacing(100.0),
             head_diameter: 6.0,
             clearance_diameter: 3.4,
             pilot_diameter: 2.5,
@@ -46,10 +47,33 @@ impl Default for TransverseFlangeFastenerSpec {
     }
 }
 
+pub type TransverseFlangeFastenerLayout = WingFlangeFastenerLayout;
+pub type TransverseFlangeFastenerSpec = WingFlangeFastenerSpec;
+
 pub struct TransverseFlangeFastenerCutters {
     pub surface: WingSurface,
     pub clearance: Manifold,
     pub pilot: Manifold,
+}
+
+pub struct TransverseThroughFlangeFastenerCutter {
+    pub surface: WingSurface,
+    pub cutter: Manifold,
+}
+
+pub struct LongitudinalEdgeFastenerCutter {
+    pub position: f64,
+    pub cutter: Manifold,
+}
+
+pub struct LongitudinalSplitFlangeFastenerCutter {
+    pub position: f64,
+    pub cutter: Manifold,
+}
+
+struct TransverseFastenerInterfaces {
+    seam_normal: [f64; 3],
+    placements: Vec<(WingSurface, [f64; 3])>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -60,7 +84,7 @@ pub fn transverse_flange_fastener_cutters(
     outer_margin: f64,
     ramp_length: f64,
     bed_thickness: f64,
-    fasteners: &TransverseFlangeFastenerSpec,
+    fasteners: &WingFlangeFastenerSpec,
 ) -> Result<Vec<TransverseFlangeFastenerCutters>, WingError> {
     validate(
         shell_thickness,
@@ -69,11 +93,203 @@ pub fn transverse_flange_fastener_cutters(
         bed_thickness,
         fasteners,
     )?;
+    let TransverseFastenerInterfaces {
+        seam_normal,
+        placements,
+    } = transverse_fastener_interfaces(wing, seam_span, shell_thickness, outer_margin, fasteners)?;
+    let mut cutters = Vec::with_capacity(placements.len());
+
+    for (surface, interface) in placements {
+        let clearance_start = add_scaled(interface, seam_normal, -fasteners.cutter_overtravel);
+        let clearance_end = add_scaled(
+            interface,
+            seam_normal,
+            bed_thickness + fasteners.cutter_overtravel,
+        );
+        let pilot_start = add_scaled(interface, seam_normal, fasteners.cutter_overtravel);
+        let pilot_end = add_scaled(interface, seam_normal, -fasteners.pilot_depth);
+        cutters.push(TransverseFlangeFastenerCutters {
+            surface,
+            clearance: oriented_cylinder(
+                clearance_start,
+                clearance_end,
+                fasteners.clearance_diameter,
+                fasteners.circular_segments,
+            )?,
+            pilot: oriented_cylinder(
+                pilot_start,
+                pilot_end,
+                fasteners.pilot_diameter,
+                fasteners.circular_segments,
+            )?,
+        });
+    }
+    Ok(cutters)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn transverse_through_flange_fastener_cutters(
+    wing: &WingSpec,
+    seam_span: f64,
+    inner_margin: f64,
+    outer_margin: f64,
+    negative_depth: f64,
+    positive_depth: f64,
+    fasteners: &WingFlangeFastenerSpec,
+) -> Result<Vec<TransverseThroughFlangeFastenerCutter>, WingError> {
+    validate_through_flange(
+        inner_margin,
+        outer_margin,
+        negative_depth,
+        positive_depth,
+        fasteners,
+    )?;
+    let TransverseFastenerInterfaces {
+        seam_normal,
+        placements,
+    } = transverse_fastener_interfaces(wing, seam_span, inner_margin, outer_margin, fasteners)?;
+    placements
+        .into_iter()
+        .map(|(surface, interface)| {
+            let start = add_scaled(
+                interface,
+                seam_normal,
+                -(negative_depth + fasteners.cutter_overtravel),
+            );
+            let end = add_scaled(
+                interface,
+                seam_normal,
+                positive_depth + fasteners.cutter_overtravel,
+            );
+            Ok(TransverseThroughFlangeFastenerCutter {
+                surface,
+                cutter: oriented_cylinder(
+                    start,
+                    end,
+                    fasteners.clearance_diameter,
+                    fasteners.circular_segments,
+                )?,
+            })
+        })
+        .collect()
+}
+
+pub fn longitudinal_edge_fastener_cutters(
+    wing: &WingSpec,
+    edge: WingEdge,
+    span_range: (f64, f64),
+    flange_width: f64,
+    half_depth: f64,
+    fasteners: &WingFlangeFastenerSpec,
+) -> Result<Vec<LongitudinalEdgeFastenerCutter>, WingError> {
+    validate_through_flange(0.0, flange_width, half_depth, half_depth, fasteners)?;
+    fastener_positions(span_range, fasteners)?
+        .into_iter()
+        .map(|position| {
+            let station = interpolate_station(wing, position)?;
+            let center_x = match edge {
+                WingEdge::Leading => -flange_width * 0.5,
+                WingEdge::Trailing => station.chord + flange_width * 0.5,
+            };
+            let center = transform_station(&station, center_x, 0.0);
+            let normal = flange_normal(wing, edge, position)?;
+            let start = add_scaled(center, normal, -(half_depth + fasteners.cutter_overtravel));
+            let end = add_scaled(center, normal, half_depth + fasteners.cutter_overtravel);
+            Ok(LongitudinalEdgeFastenerCutter {
+                position,
+                cutter: oriented_cylinder(
+                    start,
+                    end,
+                    fasteners.clearance_diameter,
+                    fasteners.circular_segments,
+                )?,
+            })
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn longitudinal_split_flange_fastener_cutters(
+    wing: &WingSpec,
+    chord_fraction: f64,
+    span_range: (f64, f64),
+    surface: WingSurface,
+    outward_direction: [f64; 3],
+    attachment_offset: f64,
+    flange_width: f64,
+    flange_thickness: f64,
+    fasteners: &WingFlangeFastenerSpec,
+) -> Result<Vec<LongitudinalSplitFlangeFastenerCutter>, WingError> {
+    validate_through_flange(
+        0.0,
+        flange_width,
+        flange_thickness * 0.5,
+        flange_thickness * 0.5,
+        fasteners,
+    )?;
+    if !chord_fraction.is_finite()
+        || !(0.0..1.0).contains(&chord_fraction)
+        || !attachment_offset.is_finite()
+        || attachment_offset < 0.0
+    {
+        return Err(WingError::InvalidSpec(
+            "invalid longitudinal split flange fastener placement",
+        ));
+    }
+    let outward_direction = normalize_array(outward_direction).ok_or(WingError::InvalidSpec(
+        "longitudinal split flange needs a non-zero outward direction",
+    ))?;
+    let span_step = ((span_range.1 - span_range.0) * 1.0e-4).max(1.0e-4);
+    fastener_positions(span_range, fasteners)?
+        .into_iter()
+        .map(|position| {
+            let frame = wing_surface_frame(wing, position, chord_fraction, surface)?;
+            let before = wing_surface_frame(
+                wing,
+                (position - span_step).max(span_range.0),
+                chord_fraction,
+                surface,
+            )?;
+            let after = wing_surface_frame(
+                wing,
+                (position + span_step).min(span_range.1),
+                chord_fraction,
+                surface,
+            )?;
+            let tangent = subtract(after.point, before.point);
+            let axis = normalize_array(cross_array(outward_direction, tangent)).ok_or(
+                WingError::InvalidSpec("cannot determine longitudinal split flange normal"),
+            )?;
+            let center = add_scaled(
+                frame.point,
+                outward_direction,
+                attachment_offset + flange_width * 0.5,
+            );
+            let half_length = flange_thickness * 0.5 + fasteners.cutter_overtravel;
+            Ok(LongitudinalSplitFlangeFastenerCutter {
+                position,
+                cutter: oriented_cylinder(
+                    add_scaled(center, axis, -half_length),
+                    add_scaled(center, axis, half_length),
+                    fasteners.clearance_diameter,
+                    fasteners.circular_segments,
+                )?,
+            })
+        })
+        .collect()
+}
+
+fn transverse_fastener_interfaces(
+    wing: &WingSpec,
+    seam_span: f64,
+    inner_margin: f64,
+    outer_margin: f64,
+    fasteners: &WingFlangeFastenerSpec,
+) -> Result<TransverseFastenerInterfaces, WingError> {
     let chord_fractions = fastener_chord_fractions(wing, seam_span, fasteners)?;
     let seam_normal = transverse_section_normal(wing, seam_span)?;
-    let radial_offset = (shell_thickness + outer_margin) * 0.5;
-    let mut cutters = Vec::with_capacity(chord_fractions.len() * 2);
-
+    let radial_offset = (inner_margin + outer_margin) * 0.5;
+    let mut interfaces = Vec::with_capacity(chord_fractions.len() * 2);
     for surface in [WingSurface::Lower, WingSurface::Upper] {
         for &chord_fraction in &chord_fractions {
             let frame = wing_surface_frame(wing, seam_span, chord_fraction, surface)?;
@@ -85,85 +301,113 @@ pub fn transverse_flange_fastener_cutters(
             .ok_or(WingError::InvalidSpec(
                 "cannot project fastener placement into the seam plane",
             ))?;
-            let interface = add_scaled(frame.point, radial_direction, radial_offset);
-            let clearance_start = add_scaled(interface, seam_normal, -fasteners.cutter_overtravel);
-            let clearance_end = add_scaled(
-                interface,
-                seam_normal,
-                bed_thickness + fasteners.cutter_overtravel,
-            );
-            let pilot_start = add_scaled(interface, seam_normal, fasteners.cutter_overtravel);
-            let pilot_end = add_scaled(interface, seam_normal, -fasteners.pilot_depth);
-            cutters.push(TransverseFlangeFastenerCutters {
+            interfaces.push((
                 surface,
-                clearance: oriented_cylinder(
-                    clearance_start,
-                    clearance_end,
-                    fasteners.clearance_diameter,
-                    fasteners.circular_segments,
-                )?,
-                pilot: oriented_cylinder(
-                    pilot_start,
-                    pilot_end,
-                    fasteners.pilot_diameter,
-                    fasteners.circular_segments,
-                )?,
-            });
+                add_scaled(frame.point, radial_direction, radial_offset),
+            ));
         }
     }
-    Ok(cutters)
+    Ok(TransverseFastenerInterfaces {
+        seam_normal,
+        placements: interfaces,
+    })
 }
 
 fn fastener_chord_fractions(
     wing: &WingSpec,
     seam_span: f64,
-    fasteners: &TransverseFlangeFastenerSpec,
+    fasteners: &WingFlangeFastenerSpec,
+) -> Result<Vec<f64>, WingError> {
+    let chord = interpolate_station_extended(wing, seam_span)?.chord;
+    Ok(fastener_positions((0.0, chord), fasteners)?
+        .into_iter()
+        .map(|position| position / chord)
+        .collect())
+}
+
+fn fastener_positions(
+    range: (f64, f64),
+    fasteners: &WingFlangeFastenerSpec,
 ) -> Result<Vec<f64>, WingError> {
     match &fasteners.layout {
-        TransverseFlangeFastenerLayout::MaximumChordSpacing(maximum_spacing) => {
+        WingFlangeFastenerLayout::MaximumSpacing(maximum_spacing) => {
             if !maximum_spacing.is_finite() || *maximum_spacing <= 0.0 {
                 return Err(WingError::InvalidSpec(
                     "maximum flange fastener spacing must be finite and positive",
                 ));
             }
-            let chord = interpolate_station(wing, seam_span)?.chord;
             let positions = EndAnchoredDistribution {
                 end_setback: fasteners.head_diameter * 2.0,
                 maximum_spacing: *maximum_spacing,
                 minimum_positions: 2,
             }
-            .positions((0.0, chord))
+            .positions(range)
             .map_err(|_| {
-                WingError::InvalidSpec(
-                    "local chord cannot fit end-anchored flange fasteners at this spacing",
-                )
+                WingError::InvalidSpec("flange cannot fit end-anchored fasteners at this spacing")
             })?;
             if positions
                 .windows(2)
                 .any(|pair| pair[1] - pair[0] < fasteners.head_diameter)
             {
                 return Err(WingError::InvalidSpec(
-                    "local chord is too short to keep flange fastener heads separate",
+                    "flange is too short to keep fastener heads separate",
                 ));
             }
-            Ok(positions
-                .into_iter()
-                .map(|position| position / chord)
-                .collect())
+            Ok(positions)
         }
-        TransverseFlangeFastenerLayout::ChordFractions(chord_fractions) => {
-            if chord_fractions.is_empty()
-                || chord_fractions
+        WingFlangeFastenerLayout::Fractions(fractions) => {
+            if fractions.is_empty()
+                || fractions
                     .iter()
                     .any(|fraction| !fraction.is_finite() || *fraction <= 0.0 || *fraction >= 1.0)
+                || fractions.windows(2).any(|pair| pair[1] <= pair[0])
             {
                 return Err(WingError::InvalidSpec(
-                    "flange fastener chord fractions must lie inside the chord",
+                    "flange fastener fractions must increase inside the flange",
                 ));
             }
-            Ok(chord_fractions.clone())
+            let length = range.1 - range.0;
+            Ok(fractions
+                .iter()
+                .map(|fraction| range.0 + length * fraction)
+                .collect())
         }
     }
+}
+
+fn validate_through_flange(
+    inner_margin: f64,
+    outer_margin: f64,
+    negative_depth: f64,
+    positive_depth: f64,
+    fasteners: &WingFlangeFastenerSpec,
+) -> Result<(), WingError> {
+    if ![
+        inner_margin,
+        outer_margin,
+        negative_depth,
+        positive_depth,
+        fasteners.head_diameter,
+        fasteners.clearance_diameter,
+        fasteners.cutter_overtravel,
+    ]
+    .into_iter()
+    .all(f64::is_finite)
+        || inner_margin < 0.0
+        || outer_margin <= inner_margin
+        || outer_margin - inner_margin <= fasteners.head_diameter
+        || negative_depth <= 0.0
+        || positive_depth <= 0.0
+        || fasteners.head_diameter <= fasteners.clearance_diameter
+        || fasteners.clearance_diameter <= 0.0
+        || fasteners.cutter_overtravel <= 0.0
+        || fasteners.circular_segments < 8
+    {
+        return Err(WingError::InvalidSpec(
+            "through-flange fasteners need safe flange and hardware dimensions",
+        ));
+    }
+    Ok(())
 }
 
 fn validate(
@@ -171,7 +415,7 @@ fn validate(
     outer_margin: f64,
     ramp_length: f64,
     bed_thickness: f64,
-    fasteners: &TransverseFlangeFastenerSpec,
+    fasteners: &WingFlangeFastenerSpec,
 ) -> Result<(), WingError> {
     if ![
         shell_thickness,
@@ -254,7 +498,10 @@ fn oriented_cylinder(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{preset, transverse_flange_blank};
+    use crate::{
+        WingBaseAttachmentSettings, chord_region_with_span_margins, preset,
+        transverse_flange_blank, wing_base_attachment_geometry,
+    };
 
     #[test]
     fn cutters_are_flange_centered_coaxial_and_stop_inside_the_ramp() {
@@ -332,8 +579,8 @@ mod tests {
     #[test]
     fn explicit_chord_fractions_remain_available() {
         let wing = preset("rectangular").unwrap();
-        let fasteners = TransverseFlangeFastenerSpec {
-            layout: TransverseFlangeFastenerLayout::ChordFractions(vec![0.2, 0.5, 0.8]),
+        let fasteners = WingFlangeFastenerSpec {
+            layout: WingFlangeFastenerLayout::Fractions(vec![0.2, 0.5, 0.8]),
             ..TransverseFlangeFastenerSpec::default()
         };
 
@@ -341,6 +588,103 @@ mod tests {
             fastener_chord_fractions(&wing, 200.0, &fasteners).unwrap(),
             vec![0.2, 0.5, 0.8]
         );
+
+        let reversed = WingFlangeFastenerSpec {
+            layout: WingFlangeFastenerLayout::Fractions(vec![0.8, 0.2]),
+            ..WingFlangeFastenerSpec::default()
+        };
+        assert!(fastener_chord_fractions(&wing, 200.0, &reversed).is_err());
+    }
+
+    #[test]
+    fn base_through_cutters_cross_both_mating_flange_bodies() {
+        let wing = preset("tapered").unwrap();
+        let geometry = wing_base_attachment_geometry(
+            &wing,
+            -4.0,
+            WingBaseAttachmentSettings {
+                flange_width: 15.2,
+                axial_thickness: 3.0,
+                registration: Default::default(),
+            },
+        )
+        .unwrap();
+        let cutters = transverse_through_flange_fastener_cutters(
+            &wing,
+            -4.0,
+            4.0,
+            15.2,
+            3.0,
+            3.0,
+            &WingFlangeFastenerSpec::default(),
+        )
+        .unwrap();
+
+        assert_eq!(cutters.len(), 6);
+        for fastener in cutters {
+            assert!(geometry.mold_flange.intersection(&fastener.cutter).volume() > 0.0);
+            assert!(
+                geometry
+                    .sealing_profile
+                    .intersection(&fastener.cutter)
+                    .volume()
+                    > 0.0
+            );
+        }
+    }
+
+    #[test]
+    fn edge_through_cutters_cross_both_parting_flanges() {
+        let wing = preset("rectangular").unwrap();
+        let lower = chord_region_with_span_margins(&wing, -3.0, 0.0, 12.0, (0.0, 0.0)).unwrap();
+        let upper = chord_region_with_span_margins(&wing, 0.0, 3.0, 12.0, (0.0, 0.0)).unwrap();
+        let fasteners = WingFlangeFastenerSpec::default();
+
+        for edge in [WingEdge::Leading, WingEdge::Trailing] {
+            let cutters = longitudinal_edge_fastener_cutters(
+                &wing,
+                edge,
+                (0.0, 200.0),
+                12.0,
+                3.0,
+                &fasteners,
+            )
+            .unwrap();
+            assert_eq!(
+                cutters
+                    .iter()
+                    .map(|cutter| cutter.position)
+                    .collect::<Vec<_>>(),
+                vec![12.0, 100.0, 188.0]
+            );
+            for fastener in cutters {
+                assert!(lower.intersection(&fastener.cutter).volume() > 0.0);
+                assert!(upper.intersection(&fastener.cutter).volume() > 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn longitudinal_split_cutters_cross_the_complete_flange_thickness() {
+        let wing = preset("rectangular").unwrap();
+        let cutters = longitudinal_split_flange_fastener_cutters(
+            &wing,
+            0.5,
+            (0.0, 200.0),
+            WingSurface::Upper,
+            [0.0, 0.0, 1.0],
+            3.2,
+            12.0,
+            3.0,
+            &WingFlangeFastenerSpec::default(),
+        )
+        .unwrap();
+
+        assert_eq!(cutters.len(), 3);
+        for fastener in cutters {
+            let bounds = fastener.cutter.bounding_box();
+            assert!((bounds.max.x - bounds.min.x - 4.0).abs() < 1.0e-9);
+        }
     }
 
     #[test]
