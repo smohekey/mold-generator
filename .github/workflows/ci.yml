@@ -37,6 +37,10 @@ jobs:
             example: straight_sample
             artifact: straight-wing-mold-sample
             output: target/sample-mold/straight
+          - sample: spitfire
+            example: spitfire_sample
+            artifact: spitfire-wing-mold-sample
+            output: target/sample-mold/spitfire
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

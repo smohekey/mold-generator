@@ -34,12 +34,17 @@ cargo run -p mold-wing-geometry -- gull gull-wing.stl
 
 The geometry API exposes `WingSpec`, `WingStation`, and `Naca4`, allowing consumers and tests to construct custom deterministic wings programmatically. It intentionally does not depend on `mold-core`, so mold-generation tests do not generate their input geometry with the algorithms under test.
 
-`mold-wing` owns the segmentation, flange, registration, webbing, tiling, validation, and export workflow. The gull and straight tapered samples contain only the wing preset and artifact configuration:
+`mold-wing` owns the segmentation, flange, registration, tiling, validation, and export workflow. The gull and straight tapered samples contain only the wing preset and artifact configuration:
 
 ```sh
 cargo run -p mold-samples --example gull_sample
 cargo run -p mold-samples --example straight_sample
+cargo run -p mold-samples --example spitfire_sample
 ```
+
+Wing molds use a minimum 4 mm shell without external support ribs. The shell grows away from the wing and the original wing solid remains the cavity cutter, so increasing wall thickness does not change modeled surface detail on the molding face. For configured protruding details, their height is added to the smooth outer offset so at least 4 mm remains behind the resulting cavity. Detail fidelity is instead bounded by the source mesh, Boolean operations, and the target printer and material.
+
+The Spitfire-style sample uses the reusable elliptical wing preset and a normalized panel grid with rivet rows on both wing surfaces. Panel-edge sampling and rivet geometry live in the production wing crates; the sample supplies only shape, detail, and artifact configuration. CI generates and uploads a separate STL/3MF artifact for every sample.
 
 ## Current vertical slice
 

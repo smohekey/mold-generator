@@ -2,6 +2,10 @@ use std::{fmt, fs::File, io::BufWriter, path::Path};
 
 use manifold_rust::{manifold::Manifold, types::MeshGL64};
 
+mod panel_rivets;
+
+pub use panel_rivets::{WingPanelRivetSpec, panel_rivet_heads};
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Naca4 {
     pub max_camber: f64,
@@ -1148,6 +1152,7 @@ impl From<std::io::Error> for WingError {
 
 pub fn preset(name: &str) -> Result<WingSpec, WingError> {
     let airfoil = Naca4::parse("2412")?;
+    let elliptical_airfoil = Naca4::parse("2213")?;
     let linear = |tip_chord: f64, sweep: f64, dihedral: f64, twist: f64| WingSpec {
         airfoil,
         stations: vec![
@@ -1175,6 +1180,31 @@ pub fn preset(name: &str) -> Result<WingSpec, WingError> {
         "swept" => Ok(linear(140.0, 120.0, 0.0, 0.0)),
         "dihedral" => Ok(linear(160.0, 0.0, 70.0, 0.0)),
         "twisted" => Ok(linear(130.0, 70.0, 45.0, -4.0)),
+        "elliptical" => {
+            let root_chord = 260.0;
+            let tip_chord = 28.0;
+            let span = 600.0;
+            let stations = [0.0_f64, 0.12, 0.25, 0.4, 0.55, 0.68, 0.8, 0.9, 0.97, 1.0]
+                .into_iter()
+                .map(|fraction| {
+                    let elliptical_fraction = (1.0 - fraction * fraction).max(0.0).sqrt();
+                    let chord = tip_chord + (root_chord - tip_chord) * elliptical_fraction;
+                    WingStation {
+                        span: span * fraction,
+                        chord,
+                        x_offset: (root_chord - chord) * 0.5,
+                        z_offset: 30.0 * fraction,
+                        twist_deg: -2.5 * fraction,
+                    }
+                })
+                .collect();
+            Ok(WingSpec {
+                airfoil: elliptical_airfoil,
+                stations,
+                profile_points: 64,
+                closed_trailing_edge: true,
+            })
+        }
         "gull" => Ok(WingSpec {
             airfoil,
             stations: vec![
@@ -1374,6 +1404,7 @@ mod tests {
             "swept",
             "dihedral",
             "twisted",
+            "elliptical",
             "gull",
         ] {
             let solid = generate(&preset(name).unwrap()).unwrap();

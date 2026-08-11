@@ -3,4 +3,6 @@
 mod generator;
 
 pub use generator::WingMoldGenerator;
-pub use mold_wing_geometry::{Naca4, WingError, WingSpec, WingStation, preset};
+pub use mold_wing_geometry::{
+    Naca4, WingError, WingPanelRivetSpec, WingSpec, WingStation, WingSurface, preset,
+};

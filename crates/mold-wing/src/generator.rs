@@ -10,23 +10,30 @@ use mold_manifold::{ManifoldKernel, ManifoldSolid, SweepEndPlane};
 use mold_shell::{
     BaseAttachmentGeometry, BaseMoldHalves, FlangeDivisionSettings, FlangeEdge, PartingRegions,
     PrintTile, PrintVolume, SegmentBoundary, SegmentFlangeSettings, SegmentationSettings,
-    ShellSettings, TiledSegmentationSettings, WebbingSettings, alternating_rib_layouts,
-    attach_base_sealing_profile, attach_structural_webbing, divide_flange,
+    ShellSettings, TiledSegmentationSettings, attach_base_sealing_profile, divide_flange,
     generate_sectioned_shell_mold_with_parting_ranges, partition_tiles_for_print_volume,
     split_with_cumulative_cutters,
 };
 use mold_wing_geometry::{
-    PrintableEnvelope, RibPathSpec, WingBaseAttachmentSettings, WingEdge, WingSpec, WingSurface,
-    chord_region_extended, chord_region_with_span_margins, printable_tile_dimensions,
-    registration_diamond, sample_longitudinal_surface_path, sample_rib_surface_path,
+    PrintableEnvelope, WingBaseAttachmentSettings, WingEdge, WingPanelRivetSpec, WingSpec,
+    WingSurface, chord_region_extended, chord_region_with_span_margins, panel_rivet_heads,
+    printable_tile_dimensions, registration_diamond, sample_longitudinal_surface_path,
     sampled_chord_band_region, segment_normal, transverse_flange_blank, transverse_section_normal,
     wing_base_attachment_geometry, wing_segment_boundaries,
 };
 
 const FLANGE_MARGIN: f64 = 12.0;
-const RIB_SAMPLES: usize = 24;
+const SURFACE_SAMPLES: usize = 24;
 const CANDIDATE_STEP: f64 = 25.0;
-const SHELL_THICKNESS: f64 = 3.0;
+const MINIMUM_WALL_THICKNESS: f64 = 4.0;
+
+fn wing_shell_settings(surface_detail_height: f64) -> ShellSettings {
+    ShellSettings {
+        thickness: MINIMUM_WALL_THICKNESS + surface_detail_height,
+        structural_webbing: None,
+        ..Default::default()
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 struct FixtureSettings {
@@ -84,6 +91,7 @@ pub struct WingMoldGenerator {
     assembly_title: String,
     model_scale: f64,
     profile_points: usize,
+    panel_rivets: Option<WingPanelRivetSpec>,
 }
 
 impl WingMoldGenerator {
@@ -100,6 +108,7 @@ impl WingMoldGenerator {
             assembly_title: assembly_title.into(),
             model_scale: 1.0,
             profile_points: 24,
+            panel_rivets: None,
         }
     }
 
@@ -110,6 +119,11 @@ impl WingMoldGenerator {
 
     pub fn with_profile_points(mut self, profile_points: usize) -> Self {
         self.profile_points = profile_points;
+        self
+    }
+
+    pub fn with_panel_rivets(mut self, panel_rivets: WingPanelRivetSpec) -> Self {
+        self.panel_rivets = Some(panel_rivets);
         self
     }
 
@@ -133,8 +147,25 @@ fn generate(generator: WingMoldGenerator) -> Result<(), Box<dyn std::error::Erro
         station.x_offset *= generator.model_scale;
         station.z_offset *= generator.model_scale;
     }
+    let panel_rivets = generator
+        .panel_rivets
+        .map(|rivets| rivets.scaled(generator.model_scale))
+        .transpose()?;
     let kernel = ManifoldKernel;
-    let part = ManifoldSolid(mold_wing_geometry::generate(&spec)?);
+    let base_part = ManifoldSolid(mold_wing_geometry::generate(&spec)?);
+    let rivet_heads = panel_rivets
+        .as_ref()
+        .map(|rivets| panel_rivet_heads(&spec, rivets).map(ManifoldSolid))
+        .transpose()?;
+    let part = match &rivet_heads {
+        Some(heads) => kernel.union_attached(&base_part, heads)?,
+        None => base_part.clone(),
+    };
+    let shell_settings = wing_shell_settings(
+        panel_rivets
+            .as_ref()
+            .map_or(0.0, |rivets| rivets.head_height),
+    );
     mold_wing_geometry::write_stl(
         &part.0,
         output.join(format!("{}.stl", generator.artifact_stem)),
@@ -145,38 +176,32 @@ fn generate(generator: WingMoldGenerator) -> Result<(), Box<dyn std::error::Erro
         -500.0,
         0.0,
         80.0,
-        SHELL_THICKNESS,
+        shell_settings.thickness,
     )?);
     let upper_region = ManifoldSolid(chord_region_extended(
         &spec,
         0.0,
         500.0,
         80.0,
-        SHELL_THICKNESS,
+        shell_settings.thickness,
     )?);
     let lower_flange = ManifoldSolid(chord_region_with_span_margins(
         &spec,
         -3.0,
         0.0,
         FLANGE_MARGIN,
-        (0.0, SHELL_THICKNESS),
+        (0.0, shell_settings.thickness),
     )?);
     let upper_flange = ManifoldSolid(chord_region_with_span_margins(
         &spec,
         0.0,
         3.0,
         FLANGE_MARGIN,
-        (0.0, SHELL_THICKNESS),
+        (0.0, shell_settings.thickness),
     )?);
 
-    let shell_settings = ShellSettings {
-        thickness: SHELL_THICKNESS,
-        structural_webbing: None,
-        ..Default::default()
-    };
-    let webbing = WebbingSettings::default();
     let segment_flanges = SegmentFlangeSettings::default();
-    let expanded_bounds = kernel.bounds(&kernel.offset(&part, shell_settings.thickness)?)?;
+    let expanded_bounds = kernel.bounds(&kernel.offset(&base_part, shell_settings.thickness)?)?;
     let segmentation = SegmentationSettings {
         print_volume: PrintVolume {
             width: 256.0,
@@ -196,8 +221,8 @@ fn generate(generator: WingMoldGenerator) -> Result<(), Box<dyn std::error::Erro
     let envelope = PrintableEnvelope {
         flange_margin: FLANGE_MARGIN,
         shell_thickness: shell_settings.thickness,
-        web_depth: webbing.depth.max(segment_flanges.width),
-        span_samples: 24,
+        web_depth: segment_flanges.width,
+        span_samples: SURFACE_SAMPLES,
     };
     let boundaries: Vec<SegmentBoundary> = candidates
         .iter()
@@ -260,11 +285,9 @@ fn generate(generator: WingMoldGenerator) -> Result<(), Box<dyn std::error::Erro
         .iter()
         .map(|insert| &insert.solid)
         .collect();
-    let (lower_ribs, upper_ribs) = build_ribs(&kernel, &spec, &ranges, registration, webbing)?;
-
-    let mut baseline = generate_sectioned_shell_mold_with_parting_ranges(
+    let mut mold = generate_sectioned_shell_mold_with_parting_ranges(
         &kernel,
-        &part,
+        &base_part,
         PartingRegions {
             negative: &lower_region,
             positive: &upper_region,
@@ -281,7 +304,7 @@ fn generate(generator: WingMoldGenerator) -> Result<(), Box<dyn std::error::Erro
     )?;
     let base_sealing_profile = attach_base_sealing_profile(
         &kernel,
-        BaseMoldHalves::first_in(&mut baseline).ok_or("mold has no root segments")?,
+        BaseMoldHalves::first_in(&mut mold).ok_or("mold has no root segments")?,
         BaseAttachmentGeometry {
             opening: &base_opening,
             mold_flange: &base_mold_flange,
@@ -297,40 +320,19 @@ fn generate(generator: WingMoldGenerator) -> Result<(), Box<dyn std::error::Erro
         &part,
         &lower_region,
         &upper_region,
-        &mut baseline,
+        &mut mold,
         &ranges,
         &tiles,
         segment_flanges,
         shell_settings.thickness,
         &socket_cutters,
     )?;
-    let mut mold = SectionedTwoPartMold {
-        negative: baseline.negative.clone(),
-        positive: baseline.positive.clone(),
-    };
-    attach_structural_webbing(
-        &kernel,
-        &part,
-        &mut mold.negative,
-        &lower_ribs,
-        &socket_cutters,
-    )?;
-    attach_structural_webbing(
-        &kernel,
-        &part,
-        &mut mold.positive,
-        &upper_ribs,
-        &socket_cutters,
-    )?;
-    let baseline = split_mold_into_tiles(&kernel, &spec, baseline, &ranges, &tiles)?;
+    if let Some(heads) = &rivet_heads {
+        cut_surface_details(&kernel, &mut mold, heads)?;
+    }
     let mold = split_mold_into_tiles(&kernel, &spec, mold, &ranges, &tiles)?;
     validate_no_part_intrusion(&part, &mold)?;
     validate_root_offset(&kernel, &part, &mold, shell_settings.thickness)?;
-
-    let lower_webbing = additions(&kernel, &mold.negative, &baseline.negative)?;
-    let upper_webbing = additions(&kernel, &mold.positive, &baseline.positive)?;
-    validate_attached("lower", &mold.negative, &baseline.negative, &lower_webbing)?;
-    validate_attached("upper", &mold.positive, &baseline.positive, &upper_webbing)?;
     export_artifacts(
         &kernel,
         MoldArtifacts {
@@ -343,6 +345,17 @@ fn generate(generator: WingMoldGenerator) -> Result<(), Box<dyn std::error::Erro
             assembly_title: &generator.assembly_title,
         },
     )?;
+    Ok(())
+}
+
+fn cut_surface_details(
+    kernel: &ManifoldKernel,
+    mold: &mut SectionedTwoPartMold<ManifoldSolid>,
+    details: &ManifoldSolid,
+) -> Result<(), mold_manifold::ManifoldKernelError> {
+    for piece in mold.negative.iter_mut().chain(&mut mold.positive) {
+        *piece = kernel.difference(piece, details)?;
+    }
     Ok(())
 }
 
@@ -474,7 +487,7 @@ fn add_segment_join_flanges(
                         chord_fraction,
                         range.0,
                         range.1,
-                        RIB_SAMPLES,
+                        SURFACE_SAMPLES,
                         surface,
                     )?;
                     let start_plane = SweepEndPlane {
@@ -546,7 +559,7 @@ fn split_mold_into_tiles(
                         -1_000.0,
                         1_000.0,
                         100.0,
-                        RIB_SAMPLES,
+                        SURFACE_SAMPLES,
                     )?));
                 }
                 split.extend(split_with_cumulative_cutters(
@@ -619,96 +632,6 @@ fn build_registration_inserts(
         }
     }
     Ok(inserts)
-}
-
-type SegmentRibs = Vec<Vec<ManifoldSolid>>;
-
-fn build_ribs(
-    kernel: &ManifoldKernel,
-    spec: &WingSpec,
-    ranges: &[(f64, f64)],
-    registration: RegistrationSettings,
-    webbing: WebbingSettings,
-) -> Result<(SegmentRibs, SegmentRibs), Box<dyn std::error::Error>> {
-    let mut lower = Vec::new();
-    let mut upper = Vec::new();
-    for &range in ranges {
-        let fixtures = divide_flange(range, registration.division);
-        let layouts = alternating_rib_layouts(&fixtures, &fixtures);
-        let upper_direction = segment_normal(spec, range.0, range.1)?;
-        let lower_direction = upper_direction.map(|value| -value);
-        let mut lower_segment = Vec::new();
-        let mut upper_segment = Vec::new();
-        for layout in layouts {
-            let lower_path = rib_path(spec, layout, webbing, WingSurface::Lower)?;
-            let upper_path = rib_path(spec, layout, webbing, WingSurface::Upper)?;
-            lower_segment.push(kernel.swept_rib(
-                &lower_path,
-                lower_direction,
-                webbing.thickness(),
-                webbing.depth,
-            )?);
-            upper_segment.push(kernel.swept_rib(
-                &upper_path,
-                upper_direction,
-                webbing.thickness(),
-                webbing.depth,
-            )?);
-        }
-        lower.push(lower_segment);
-        upper.push(upper_segment);
-    }
-    Ok((lower, upper))
-}
-
-fn rib_path(
-    spec: &WingSpec,
-    layout: mold_shell::RibLayout,
-    webbing: WebbingSettings,
-    surface: WingSurface,
-) -> Result<Vec<[f64; 3]>, Box<dyn std::error::Error>> {
-    Ok(sample_rib_surface_path(
-        spec,
-        RibPathSpec {
-            start_edge: wing_edge(layout.start.edge),
-            start_span: layout.start.span,
-            end_edge: wing_edge(layout.end.edge),
-            end_span: layout.end.span,
-            flange_margin: FLANGE_MARGIN,
-            rib_thickness: webbing.thickness(),
-            samples: RIB_SAMPLES,
-            surface,
-        },
-    )?)
-}
-
-fn additions(
-    kernel: &ManifoldKernel,
-    webbed: &[ManifoldSolid],
-    baseline: &[ManifoldSolid],
-) -> Result<Vec<ManifoldSolid>, mold_manifold::ManifoldKernelError> {
-    webbed
-        .iter()
-        .zip(baseline)
-        .map(|(piece, plain)| kernel.difference(piece, plain))
-        .collect()
-}
-
-fn validate_attached(
-    half: &str,
-    webbed: &[ManifoldSolid],
-    baseline: &[ManifoldSolid],
-    additions: &[ManifoldSolid],
-) -> Result<(), Box<dyn std::error::Error>> {
-    for (index, ((piece, plain), added)) in webbed.iter().zip(baseline).zip(additions).enumerate() {
-        if piece.0.decompose().len() > plain.0.decompose().len() {
-            return Err(format!("{half} segment {} gained a disconnected rib", index + 1).into());
-        }
-        if added.0.is_empty() || added.0.volume() <= 1.0e-9 {
-            return Err(format!("{half} segment {} has no attached webbing", index + 1).into());
-        }
-    }
-    Ok(())
 }
 
 fn export_artifacts(
@@ -790,5 +713,25 @@ const fn wing_edge_name(edge: WingEdge) -> &'static str {
     match edge {
         WingEdge::Leading => "leading",
         WingEdge::Trailing => "trailing",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wing_shell_is_four_millimetres_without_webbing() {
+        let settings = wing_shell_settings(0.0);
+
+        assert_eq!(settings.thickness, 4.0);
+        assert!(settings.structural_webbing.is_none());
+    }
+
+    #[test]
+    fn wing_shell_adds_surface_detail_height_to_preserve_minimum_wall() {
+        let settings = wing_shell_settings(0.35);
+
+        assert_eq!(settings.thickness, 4.35);
     }
 }
