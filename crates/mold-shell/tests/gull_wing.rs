@@ -99,6 +99,7 @@ fn extrusion_width_controls_structural_web_thickness() {
 #[test]
 fn print_volume_constrains_gull_wing_segmentation_and_preserves_the_bend() {
     let spec = preset("gull").unwrap();
+    let bend_span = spec.stations[1].span;
     let candidates = wing_segment_boundaries(&spec, -3.0, 603.0, 25.0).unwrap();
     let boundaries: Vec<SegmentBoundary> = candidates
         .iter()
@@ -129,7 +130,7 @@ fn print_volume_constrains_gull_wing_segmentation_and_preserves_the_bend() {
     let tall_volume = PrintVolume {
         width: 320.0,
         depth: 320.0,
-        height: 500.0,
+        height: 580.0,
         clearance: 5.0,
     };
     let short_volume = PrintVolume {
@@ -146,7 +147,7 @@ fn print_volume_constrains_gull_wing_segmentation_and_preserves_the_bend() {
     let short_printer = partition(short_volume);
     let compact_printer = partition(compact_volume);
 
-    assert_eq!(tall_printer, vec![(-3.0, 180.0), (180.0, 603.0)]);
+    assert_eq!(tall_printer, vec![(-3.0, bend_span), (bend_span, 603.0)]);
     assert!(short_printer.len() > tall_printer.len());
     for range in short_printer {
         let dimensions = printable_segment_dimensions(&spec, range.0, range.1, envelope).unwrap();

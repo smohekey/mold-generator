@@ -1468,10 +1468,10 @@ mod tests {
     fn gull_segment_joins_get_registration_on_every_mating_flange() {
         let spec = mold_wing_geometry::preset("gull").unwrap();
         let ranges = [
-            (0.0, 216.0),
-            (216.0, 374.4827586206897),
-            (374.4827586206897, 549.2413793103448),
-            (549.2413793103448, 724.0),
+            (0.0, 123.14329738058551),
+            (123.14329738058551, 324.55172413793105),
+            (324.55172413793105, 524.2758620689655),
+            (524.2758620689655, 724.0),
         ];
         let tiles = [
             PrintTile {
@@ -1525,7 +1525,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(transverse.len(), 16);
-        assert_eq!(longitudinal.len(), 4);
+        assert_eq!(longitudinal.len(), 2);
         for insert in transverse.iter().chain(&longitudinal) {
             let mating = insert.mating.expect("segment insert needs mating tiles");
             assert_ne!(mating.tile_indices[0], mating.tile_indices[1]);

@@ -1124,8 +1124,10 @@ pub fn preset(name: &str) -> Result<WingSpec, WingError> {
             })
         }
         "gull" => {
-            let bend_span = 180.0;
             let tip_span = 600.0;
+            let inner_panel_ratio = 1_110.0;
+            let outer_panel_ratio = 5_380.0;
+            let bend_span = tip_span * inner_panel_ratio / (inner_panel_ratio + outer_panel_ratio);
             let inner_dihedral_deg: f64 = -12.0;
             let outer_dihedral_deg: f64 = 8.0;
             let bend_z = bend_span * inner_dihedral_deg.to_radians().tan();
@@ -1363,20 +1365,34 @@ mod tests {
     }
 
     #[test]
+    fn gull_preset_uses_requested_outer_to_inner_panel_ratio() {
+        let spec = preset("gull").unwrap();
+        assert_eq!(spec.stations.len(), 3);
+
+        let inner_span = spec.stations[1].span - spec.stations[0].span;
+        let outer_span = spec.stations[2].span - spec.stations[1].span;
+
+        assert!((outer_span / inner_span - 5_380.0 / 1_110.0).abs() < 1.0e-12);
+        assert!((inner_span + outer_span - 600.0).abs() < 1.0e-12);
+    }
+
+    #[test]
     fn gull_segments_break_at_the_largest_axial_deviation() {
         let spec = preset("gull").unwrap();
+        let bend_span = spec.stations[1].span;
         let ranges = deviation_aware_segment_ranges(&spec, 2, -3.0, 363.0).unwrap();
 
-        assert_eq!(ranges, vec![(-3.0, 180.0), (180.0, 363.0)]);
+        assert_eq!(ranges, vec![(-3.0, bend_span), (bend_span, 363.0)]);
     }
 
     #[test]
     fn print_candidates_preserve_the_gull_bend_among_regular_fit_samples() {
         let spec = preset("gull").unwrap();
+        let bend_span = spec.stations[1].span;
         let boundaries = wing_segment_boundaries(&spec, -3.0, 603.0, 25.0).unwrap();
         let bend = boundaries
             .iter()
-            .find(|boundary| (boundary.position - 180.0).abs() < 1.0e-9)
+            .find(|boundary| (boundary.position - bend_span).abs() < 1.0e-9)
             .unwrap();
 
         assert!(bend.deviation > 0.1);
@@ -1387,6 +1403,7 @@ mod tests {
     #[test]
     fn printable_dimensions_include_flanges_backing_and_axial_deviation() {
         let spec = preset("gull").unwrap();
+        let bend_span = spec.stations[1].span;
         let envelope = PrintableEnvelope {
             flange_margin: 12.0,
             shell_thickness: 3.0,
@@ -1394,11 +1411,23 @@ mod tests {
             span_samples: 24,
         };
         let full = printable_segment_dimensions(&spec, -3.0, 603.0, envelope).unwrap();
-        let inboard = printable_segment_dimensions(&spec, -3.0, 180.0, envelope).unwrap();
-        let outboard = printable_segment_dimensions(&spec, 180.0, 603.0, envelope).unwrap();
+        let bare = printable_segment_dimensions(
+            &spec,
+            -3.0,
+            603.0,
+            PrintableEnvelope {
+                flange_margin: 0.0,
+                shell_thickness: 0.0,
+                web_depth: 0.0,
+                span_samples: envelope.span_samples,
+            },
+        )
+        .unwrap();
+        let inboard = printable_segment_dimensions(&spec, -3.0, bend_span, envelope).unwrap();
+        let outboard = printable_segment_dimensions(&spec, bend_span, 603.0, envelope).unwrap();
 
-        assert!(full[0] >= 264.0);
-        assert!(full[1] > 11.0);
+        assert!(full[0] > bare[0]);
+        assert!(full[1] > bare[1]);
         assert!(full[2] > inboard[2]);
         assert!(full[2] > outboard[2]);
     }
@@ -1406,7 +1435,7 @@ mod tests {
     #[test]
     fn segment_normal_tracks_the_wing_and_points_upward() {
         let spec = preset("gull").unwrap();
-        let normal = segment_normal(&spec, 0.0, 180.0).unwrap();
+        let normal = segment_normal(&spec, 0.0, spec.stations[1].span).unwrap();
         let length = normal
             .iter()
             .map(|component| component.powi(2))
@@ -1421,11 +1450,12 @@ mod tests {
     #[test]
     fn transverse_section_normal_matches_the_lateral_flange_face() {
         let spec = preset("gull").unwrap();
-        let station = interpolate_station(&spec, 180.0).unwrap();
+        let bend_span = spec.stations[1].span;
+        let station = interpolate_station(&spec, bend_span).unwrap();
         let origin = transform_station(&station, 0.0, 0.0);
         let chord_tangent = subtract(transform_station(&station, station.chord, 0.0), origin);
         let thickness_tangent = subtract(transform_station(&station, 0.0, 1.0), origin);
-        let normal = transverse_section_normal(&spec, 180.0).unwrap();
+        let normal = transverse_section_normal(&spec, bend_span).unwrap();
 
         assert!(dot(normal, chord_tangent).abs() < 1.0e-12);
         assert!(dot(normal, thickness_tangent).abs() < 1.0e-12);
@@ -1465,11 +1495,12 @@ mod tests {
     #[test]
     fn longitudinal_flange_paths_follow_the_upper_and_lower_surfaces() {
         let spec = preset("gull").unwrap();
+        let bend_span = spec.stations[1].span;
         let lower =
-            sample_longitudinal_surface_path(&spec, 0.5, 0.0, 180.0, 12, WingSurface::Lower)
+            sample_longitudinal_surface_path(&spec, 0.5, 0.0, bend_span, 12, WingSurface::Lower)
                 .unwrap();
         let upper =
-            sample_longitudinal_surface_path(&spec, 0.5, 0.0, 180.0, 12, WingSurface::Upper)
+            sample_longitudinal_surface_path(&spec, 0.5, 0.0, bend_span, 12, WingSurface::Upper)
                 .unwrap();
 
         assert_eq!(lower.len(), 13);
@@ -1513,10 +1544,11 @@ mod tests {
     #[test]
     fn sampled_chord_band_can_extend_before_the_root() {
         let spec = preset("gull").unwrap();
+        let bend_span = spec.stations[1].span;
         let region = sampled_chord_band_region(
             &spec,
             (0.0, 0.5),
-            (-3.0, 180.0),
+            (-3.0, bend_span),
             -1_000.0,
             1_000.0,
             100.0,
@@ -1530,7 +1562,9 @@ mod tests {
     #[test]
     fn tapered_transverse_flange_blank_is_a_closed_loft() {
         let spec = preset("gull").unwrap();
-        let flange = transverse_flange_blank(&spec, &[(168.0, 3.0), (180.0, 12.0)]).unwrap();
+        let bend_span = spec.stations[1].span;
+        let flange =
+            transverse_flange_blank(&spec, &[(bend_span - 12.0, 3.0), (bend_span, 12.0)]).unwrap();
 
         assert!(!flange.is_empty());
         assert!(flange.volume() > 0.0);
