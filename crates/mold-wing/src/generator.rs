@@ -582,6 +582,7 @@ fn add_segment_join_flanges(
         inner_margin: shell_thickness,
         outer_margin: lateral_flange_margin,
     };
+    let longitudinal_flange_thickness = settings.longitudinal_flange_thickness();
 
     let attach = |piece: &mut ManifoldSolid,
                   blank: ManifoldSolid,
@@ -689,7 +690,7 @@ fn add_segment_join_flanges(
                     Ok(kernel.swept_rib_with_end_planes(
                         &path,
                         direction,
-                        settings.axial_thickness,
+                        longitudinal_flange_thickness,
                         settings.width,
                         start_plane,
                         end_plane,
@@ -706,7 +707,7 @@ fn add_segment_join_flanges(
                 WingSurface::Lower,
                 lower_direction,
                 longitudinal_fastener_band,
-                settings.axial_thickness,
+                longitudinal_flange_thickness,
                 end_obstructions,
                 fasteners,
             )?;
@@ -717,7 +718,7 @@ fn add_segment_join_flanges(
                 WingSurface::Upper,
                 upper_direction,
                 longitudinal_fastener_band,
-                settings.axial_thickness,
+                longitudinal_flange_thickness,
                 end_obstructions,
                 fasteners,
             )?;
@@ -1084,8 +1085,12 @@ fn build_longitudinal_join_registration_inserts(
     fasteners: &WingFlangeFastenerSpec,
     settings: WingLongitudinalRegistrationSettings,
 ) -> Result<Vec<RegistrationInsert>, Box<dyn std::error::Error>> {
+    if settings.seam_half_depth > flange_settings.axial_thickness {
+        return Err("longitudinal registration depth exceeds each tile's flange thickness".into());
+    }
     let model_start = spec.stations.first().ok_or("wing has no stations")?.span;
     let model_end = spec.stations.last().ok_or("wing has no stations")?.span;
+    let longitudinal_flange_thickness = flange_settings.longitudinal_flange_thickness();
     let mut inserts = Vec::new();
     for (section, range) in ranges.iter().enumerate() {
         let section_tiles: Vec<&PrintTile> =
@@ -1120,7 +1125,7 @@ fn build_longitudinal_join_registration_inserts(
                     surface,
                     direction,
                     band,
-                    flange_settings.axial_thickness,
+                    longitudinal_flange_thickness,
                     end_obstructions,
                     fasteners,
                 )?;
@@ -1375,6 +1380,18 @@ mod tests {
             longitudinal_flange_end_obstructions(2, 3, 12.0),
             FlangeEndObstructions::default()
         );
+    }
+
+    #[test]
+    fn longitudinal_registration_stays_within_each_tile_flange() {
+        let flange = SegmentFlangeSettings::default();
+        let registration = WingLongitudinalRegistrationSettings::default();
+
+        assert_eq!(
+            flange.longitudinal_flange_thickness() * 0.5,
+            flange.axial_thickness
+        );
+        assert!(registration.seam_half_depth < flange.axial_thickness);
     }
 
     #[test]

@@ -799,6 +799,9 @@ mod tests {
     #[test]
     fn longitudinal_split_cutters_cross_the_complete_flange_thickness() {
         let wing = preset("rectangular").unwrap();
+        let per_tile_thickness = 3.0;
+        let complete_flange_thickness = per_tile_thickness * 2.0;
+        let fasteners = WingFlangeFastenerSpec::default();
         let cutters = longitudinal_split_flange_fastener_cutters(
             &wing,
             0.5,
@@ -809,9 +812,9 @@ mod tests {
                 inner_margin: 4.0,
                 outer_margin: 15.2,
             },
-            3.0,
+            complete_flange_thickness,
             FlangeEndObstructions::default(),
-            &WingFlangeFastenerSpec::default(),
+            &fasteners,
         )
         .unwrap();
 
@@ -820,7 +823,14 @@ mod tests {
             let frame =
                 wing_surface_frame(&wing, fastener.position, 0.5, WingSurface::Upper).unwrap();
             let bounds = fastener.cutter.bounding_box();
-            assert!((bounds.max.x - bounds.min.x - 4.0).abs() < 1.0e-9);
+            assert!(
+                (bounds.max.x
+                    - bounds.min.x
+                    - complete_flange_thickness
+                    - fasteners.cutter_overtravel * 2.0)
+                    .abs()
+                    < 1.0e-9
+            );
             assert!(((bounds.min.z + bounds.max.z) * 0.5 - frame.point[2] - 9.6).abs() < 1.0e-9);
         }
     }

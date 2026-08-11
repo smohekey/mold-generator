@@ -37,6 +37,12 @@ impl SegmentFlangeSettings {
         Self::longitudinal_attachment_offset(shell_thickness) + self.width
     }
 
+    /// The swept longitudinal flange straddles a chord split, so its complete
+    /// thickness contains one `axial_thickness` mating side per print tile.
+    pub fn longitudinal_flange_thickness(self) -> f64 {
+        self.axial_thickness * 2.0
+    }
+
     pub fn top_ramp_length(self) -> f64 {
         self.width / self.maximum_overhang_angle_deg.to_radians().tan()
     }
@@ -1372,6 +1378,14 @@ mod tests {
             (settings.lateral_flange_margin(shell_thickness) - (attachment + settings.width)).abs()
                 < 1.0e-9
         );
+    }
+
+    #[test]
+    fn longitudinal_flange_preserves_axial_thickness_on_both_mating_tiles() {
+        let settings = SegmentFlangeSettings::default();
+
+        assert_eq!(settings.axial_thickness, 3.0);
+        assert_eq!(settings.longitudinal_flange_thickness(), 6.0);
     }
 
     #[test]
