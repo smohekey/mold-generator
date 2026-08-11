@@ -212,6 +212,7 @@ fn generate(generator: WingMoldGenerator) -> Result<(), Box<dyn std::error::Erro
     )?);
 
     let segment_flanges = SegmentFlangeSettings::default();
+    let root_span = spec.stations.first().ok_or("wing has no stations")?.span;
     let expanded_bounds = kernel.bounds(&kernel.offset(&base_part, shell_settings.thickness)?)?;
     let segmentation = SegmentationSettings {
         print_volume: PrintVolume {
@@ -223,12 +224,8 @@ fn generate(generator: WingMoldGenerator) -> Result<(), Box<dyn std::error::Erro
         preferred_segment_count: None,
         max_segment_count: 8,
     };
-    let candidates = wing_segment_boundaries(
-        &spec,
-        expanded_bounds.min.y,
-        expanded_bounds.max.y,
-        CANDIDATE_STEP,
-    )?;
+    let candidates =
+        wing_segment_boundaries(&spec, root_span, expanded_bounds.max.y, CANDIDATE_STEP)?;
     let envelope = PrintableEnvelope {
         flange_margin: FLANGE_MARGIN,
         shell_thickness: shell_settings.thickness,
@@ -272,7 +269,7 @@ fn generate(generator: WingMoldGenerator) -> Result<(), Box<dyn std::error::Erro
     let registration = RegistrationSettings::default();
     let base_geometry = wing_base_attachment_geometry(
         &spec,
-        expanded_bounds.min.y,
+        &base_part.0,
         WingBaseAttachmentSettings {
             flange_width: segment_flanges.lateral_flange_margin(shell_settings.thickness),
             axial_thickness: segment_flanges.axial_thickness,
@@ -316,7 +313,7 @@ fn generate(generator: WingMoldGenerator) -> Result<(), Box<dyn std::error::Erro
     }));
     let base_fastener_cutters: Vec<ManifoldSolid> = transverse_through_flange_fastener_cutters(
         &spec,
-        expanded_bounds.min.y,
+        root_span,
         shell_settings.thickness,
         segment_flanges.lateral_flange_margin(shell_settings.thickness),
         segment_flanges.axial_thickness,
@@ -410,7 +407,7 @@ fn generate(generator: WingMoldGenerator) -> Result<(), Box<dyn std::error::Erro
     }
     let mold = split_mold_into_tiles(&kernel, &spec, mold, &ranges, &tiles)?;
     validate_no_part_intrusion(&part, &mold)?;
-    validate_root_offset(&kernel, &part, &mold, shell_settings.thickness)?;
+    validate_root_alignment(&kernel, &part, &mold, &base_sealing_profile)?;
     export_artifacts(
         &kernel,
         MoldArtifacts {
@@ -437,11 +434,11 @@ fn cut_surface_details(
     Ok(())
 }
 
-fn validate_root_offset(
+fn validate_root_alignment(
     kernel: &ManifoldKernel,
     part: &ManifoldSolid,
     mold: &SectionedTwoPartMold<ManifoldSolid>,
-    expected_offset: f64,
+    sealing_profile: &ManifoldSolid,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let wing_root = kernel.bounds(part)?.min.y;
     let mold_root = mold
@@ -452,9 +449,10 @@ fn validate_root_offset(
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .fold(f64::INFINITY, f64::min);
-    if mold_root > wing_root - expected_offset * 0.9 {
+    let sealing_face = kernel.bounds(sealing_profile)?.max.y;
+    if (mold_root - wing_root).abs() > 1.0e-6 || (sealing_face - wing_root).abs() > 1.0e-6 {
         return Err(format!(
-            "root mold face is not offset from wing: wing={wing_root:.6}, mold={mold_root:.6}"
+            "wing, mold, and sealing profile do not share the root plane: wing={wing_root:.6}, mold={mold_root:.6}, seal={sealing_face:.6}"
         )
         .into());
     }
@@ -989,6 +987,7 @@ const fn wing_edge_name(edge: WingEdge) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mold_geometry::{Bounds3, Vec3};
 
     #[test]
     fn wing_shell_is_four_millimetres_without_webbing() {
@@ -1018,5 +1017,28 @@ mod tests {
             longitudinal_flange_end_obstructions(2, 3, 12.0),
             FlangeEndObstructions::default()
         );
+    }
+
+    #[test]
+    fn root_alignment_rejects_an_offset_sealing_face() {
+        let kernel = ManifoldKernel;
+        let cuboid = |min_y, max_y| {
+            kernel
+                .cuboid(Bounds3 {
+                    min: Vec3::new(0.0, min_y, 0.0),
+                    max: Vec3::new(10.0, max_y, 10.0),
+                })
+                .unwrap()
+        };
+        let part = cuboid(0.0, 10.0);
+        let mold = SectionedTwoPartMold {
+            negative: vec![cuboid(0.0, 10.0)],
+            positive: vec![cuboid(0.0, 10.0)],
+        };
+        let aligned_seal = cuboid(-3.0, 0.0);
+        let offset_seal = cuboid(-4.0, -1.0);
+
+        assert!(validate_root_alignment(&kernel, &part, &mold, &aligned_seal).is_ok());
+        assert!(validate_root_alignment(&kernel, &part, &mold, &offset_seal).is_err());
     }
 }

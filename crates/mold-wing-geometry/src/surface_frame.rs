@@ -93,7 +93,7 @@ mod tests {
     }
 
     #[test]
-    fn root_offset_frame_matches_the_extended_root_profile() {
+    fn frame_before_root_matches_the_extended_root_profile() {
         let wing = preset("tapered").unwrap();
         let frame = wing_surface_frame(&wing, -4.0, 0.5, WingSurface::Upper).unwrap();
 

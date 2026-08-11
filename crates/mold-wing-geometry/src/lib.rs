@@ -883,59 +883,51 @@ pub fn transverse_registration_diamond(
 
 pub fn wing_base_attachment_geometry(
     spec: &WingSpec,
-    attachment_span: f64,
+    wing: &Manifold,
     settings: WingBaseAttachmentSettings,
 ) -> Result<WingBaseAttachmentGeometry, WingError> {
-    let model_start = spec
+    let root_span = spec
         .stations
         .first()
         .ok_or(WingError::InvalidSpec("wing has no stations"))?
         .span;
-    if ![
-        attachment_span,
-        settings.flange_width,
-        settings.axial_thickness,
-    ]
-    .into_iter()
-    .all(f64::is_finite)
-        || attachment_span >= model_start
+    let wing_bounds = wing.bounding_box();
+    if ![root_span, settings.flange_width, settings.axial_thickness]
+        .into_iter()
+        .all(f64::is_finite)
+        || wing.is_empty()
+        || (wing_bounds.min.y - root_span).abs() > 1.0e-6
         || settings.flange_width <= 0.0
         || settings.axial_thickness <= 0.0
     {
         return Err(WingError::InvalidSpec(
-            "base attachment needs an offset root and positive flange dimensions",
+            "base attachment needs a matching wing root and positive flange dimensions",
         ));
     }
 
-    let flange_end = attachment_span + settings.axial_thickness;
-    // Extend the opening cutter beyond both ends of the base flange so neither
-    // its mating face nor the wing-root transition can retain a coincident
-    // chordwise cap.
+    let flange_end = root_span + settings.axial_thickness;
+    // Straddle the shared root plane so coincident shell or parting surfaces
+    // cannot survive without extending the finished mold cavity past the wing.
     let opening = transverse_profile_blank(
         spec,
         &[
-            attachment_span - settings.axial_thickness,
-            attachment_span,
-            model_start,
-            model_start + settings.axial_thickness,
+            root_span - settings.axial_thickness,
+            root_span,
+            root_span + settings.axial_thickness,
         ],
     )?;
-    let flange_core = transverse_profile_blank(spec, &[attachment_span, flange_end])?;
     let flange_outer = transverse_flange_blank(
         spec,
         &[
-            (attachment_span, settings.flange_width),
+            (root_span, settings.flange_width),
             (flange_end, settings.flange_width),
         ],
     )?;
     let sealing_profile = transverse_flange_blank(
         spec,
         &[
-            (
-                attachment_span - settings.axial_thickness,
-                settings.flange_width,
-            ),
-            (attachment_span, settings.flange_width),
+            (root_span - settings.axial_thickness, settings.flange_width),
+            (root_span, settings.flange_width),
         ],
     )?;
     let registration = |edge| -> Result<(WingEdge, Manifold), WingError> {
@@ -944,7 +936,7 @@ pub fn wing_base_attachment_geometry(
             transverse_registration_diamond(
                 spec,
                 edge,
-                attachment_span,
+                root_span,
                 settings.flange_width,
                 settings.registration.radial_half_width,
                 settings.registration.tangent_half_width,
@@ -952,10 +944,11 @@ pub fn wing_base_attachment_geometry(
             )?,
         ))
     };
+    let mold_flange = flange_outer.difference(wing).difference(&opening);
 
     Ok(WingBaseAttachmentGeometry {
         opening,
-        mold_flange: flange_outer.difference(&flange_core),
+        mold_flange,
         sealing_profile,
         registration: [
             registration(WingEdge::Leading)?,
@@ -1580,7 +1573,7 @@ mod tests {
     }
 
     #[test]
-    fn sampled_longitudinal_split_reaches_the_offset_root_face() {
+    fn sampled_chord_band_can_extend_before_the_root() {
         let spec = preset("gull").unwrap();
         let region = sampled_chord_band_region(
             &spec,
@@ -1633,11 +1626,12 @@ mod tests {
     }
 
     #[test]
-    fn base_sealing_profile_and_root_flange_have_mating_registration() {
+    fn base_sealing_profile_and_root_flange_meet_at_the_wing_root() {
         let spec = preset("gull").unwrap();
+        let part = generate(&spec).unwrap();
         let geometry = wing_base_attachment_geometry(
             &spec,
-            -3.0,
+            &part,
             WingBaseAttachmentSettings {
                 flange_width: 12.0,
                 axial_thickness: 3.0,
@@ -1658,15 +1652,18 @@ mod tests {
         }
 
         assert!(flange.intersection(&geometry.opening).volume() < 1.0e-6);
-        assert!((seal.bounding_box().max.y + 3.0).abs() < 1.0e-9);
+        assert!(flange.intersection(&part).volume() < 1.0e-6);
+        assert!((flange.bounding_box().min.y - 0.0).abs() < 1.0e-9);
+        assert!((seal.bounding_box().max.y - 0.0).abs() < 1.0e-9);
     }
 
     #[test]
-    fn base_opening_cutter_crosses_both_flange_ends() {
+    fn base_opening_cutter_only_straddles_the_wing_root() {
         let spec = preset("gull").unwrap();
+        let part = generate(&spec).unwrap();
         let geometry = wing_base_attachment_geometry(
             &spec,
-            -3.0,
+            &part,
             WingBaseAttachmentSettings {
                 flange_width: 14.4,
                 axial_thickness: 3.0,
@@ -1676,9 +1673,8 @@ mod tests {
         .unwrap();
         let bounds = geometry.opening.bounding_box();
 
-        assert!((bounds.min.y + 6.0).abs() < 1.0e-9);
+        assert!((bounds.min.y + 3.0).abs() < 1.0e-9);
         assert!((bounds.max.y - 3.0).abs() < 1.0e-9);
-        assert!(bounds.min.y < -3.0 && bounds.max.y > -3.0);
         assert!(bounds.min.y < 0.0 && bounds.max.y > 0.0);
     }
 }

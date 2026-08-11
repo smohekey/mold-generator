@@ -681,9 +681,10 @@ mod tests {
     #[test]
     fn base_through_cutters_cross_both_mating_flange_bodies() {
         let wing = preset("tapered").unwrap();
+        let part = crate::generate(&wing).unwrap();
         let geometry = wing_base_attachment_geometry(
             &wing,
-            -4.0,
+            &part,
             WingBaseAttachmentSettings {
                 flange_width: 15.2,
                 axial_thickness: 3.0,
@@ -693,7 +694,7 @@ mod tests {
         .unwrap();
         let cutters = transverse_through_flange_fastener_cutters(
             &wing,
-            -4.0,
+            0.0,
             4.0,
             15.2,
             3.0,
