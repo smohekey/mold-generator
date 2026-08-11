@@ -15,9 +15,9 @@ use mold_shell::{
     split_with_cumulative_cutters,
 };
 use mold_wing_geometry::{
-    FlangeEndObstructions, PrintableEnvelope, WingBaseAttachmentSettings, WingEdge,
-    WingFlangeFastenerSpec, WingPanelRivetSpec, WingSpec, WingSurface, chord_region_extended,
-    chord_region_with_span_margins, longitudinal_edge_fastener_cutters,
+    FlangeEndObstructions, FlangeFastenerBand, PrintableEnvelope, WingBaseAttachmentSettings,
+    WingEdge, WingFlangeFastenerSpec, WingPanelRivetSpec, WingSpec, WingSurface,
+    chord_region_extended, chord_region_with_span_margins, longitudinal_edge_fastener_cutters,
     longitudinal_split_flange_fastener_cutters, panel_rivet_heads, printable_tile_dimensions,
     registration_diamond, sample_longitudinal_surface_path, sampled_chord_band_region,
     segment_normal, transverse_flange_blank, transverse_flange_fastener_cutters,
@@ -285,7 +285,10 @@ fn generate(generator: WingMoldGenerator) -> Result<(), Box<dyn std::error::Erro
     let edge_fastener_holes = build_edge_fastener_holes(
         &spec,
         &ranges,
-        FLANGE_MARGIN,
+        FlangeFastenerBand {
+            inner_margin: shell_settings.thickness,
+            outer_margin: FLANGE_MARGIN,
+        },
         PARTING_FLANGE_HALF_DEPTH,
         segment_flanges.top_ramp_length(),
         &generator.flange_fasteners,
@@ -506,6 +509,10 @@ fn add_segment_join_flanges(
     let longitudinal_attachment_offset =
         SegmentFlangeSettings::longitudinal_attachment_offset(shell_thickness);
     let lateral_flange_margin = settings.lateral_flange_margin(shell_thickness);
+    let longitudinal_fastener_band = FlangeFastenerBand {
+        inner_margin: shell_thickness,
+        outer_margin: lateral_flange_margin,
+    };
 
     let attach = |piece: &mut ManifoldSolid,
                   blank: ManifoldSolid,
@@ -629,8 +636,7 @@ fn add_segment_join_flanges(
                 *range,
                 WingSurface::Lower,
                 lower_direction,
-                longitudinal_attachment_offset,
-                settings.width,
+                longitudinal_fastener_band,
                 settings.axial_thickness,
                 end_obstructions,
                 fasteners,
@@ -641,8 +647,7 @@ fn add_segment_join_flanges(
                 *range,
                 WingSurface::Upper,
                 upper_direction,
-                longitudinal_attachment_offset,
-                settings.width,
+                longitudinal_fastener_band,
                 settings.axial_thickness,
                 end_obstructions,
                 fasteners,
@@ -760,7 +765,7 @@ fn validate_tile_partition(
 fn build_edge_fastener_holes(
     spec: &WingSpec,
     ranges: &[(f64, f64)],
-    flange_width: f64,
+    band: FlangeFastenerBand,
     half_depth: f64,
     sloped_end_length: f64,
     fasteners: &WingFlangeFastenerSpec,
@@ -775,7 +780,7 @@ fn build_edge_fastener_holes(
                     spec,
                     wing_edge(edge),
                     range,
-                    flange_width,
+                    band,
                     half_depth,
                     end_obstructions,
                     fasteners,
