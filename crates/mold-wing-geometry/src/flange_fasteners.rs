@@ -12,7 +12,6 @@ use crate::{
 #[derive(Debug, Clone, PartialEq)]
 pub struct TransverseFlangeFastenerSpec {
     pub chord_fractions: Vec<f64>,
-    pub offset_from_shell: f64,
     pub clearance_diameter: f64,
     pub pilot_diameter: f64,
     pub pilot_depth: f64,
@@ -24,10 +23,9 @@ impl Default for TransverseFlangeFastenerSpec {
     fn default() -> Self {
         Self {
             chord_fractions: vec![0.25, 0.75],
-            offset_from_shell: 3.0,
             clearance_diameter: 3.4,
             pilot_diameter: 2.5,
-            pilot_depth: 6.0,
+            pilot_depth: 4.0,
             cutter_overtravel: 0.5,
             circular_segments: 16,
         }
@@ -58,7 +56,7 @@ pub fn transverse_flange_fastener_cutters(
         fasteners,
     )?;
     let seam_normal = transverse_section_normal(wing, seam_span)?;
-    let radial_offset = shell_thickness + fasteners.offset_from_shell;
+    let radial_offset = (shell_thickness + outer_margin) * 0.5;
     let mut cutters = Vec::with_capacity(fasteners.chord_fractions.len() * 2);
 
     for surface in [WingSurface::Lower, WingSurface::Upper] {
@@ -118,7 +116,6 @@ fn validate(
             outer_margin,
             ramp_length,
             bed_thickness,
-            fasteners.offset_from_shell,
             fasteners.clearance_diameter,
             fasteners.pilot_diameter,
             fasteners.pilot_depth,
@@ -130,7 +127,6 @@ fn validate(
         || outer_margin <= shell_thickness
         || ramp_length <= 0.0
         || bed_thickness <= 0.0
-        || fasteners.offset_from_shell <= fasteners.clearance_diameter * 0.5
         || fasteners.clearance_diameter <= fasteners.pilot_diameter
         || fasteners.pilot_diameter <= 0.0
         || fasteners.pilot_depth <= 0.0
@@ -139,14 +135,15 @@ fn validate(
         || fasteners.circular_segments < 8
     {
         return Err(WingError::InvalidSpec(
-            "flange fasteners need safe offsets, a through clearance hole, and a smaller blind pilot",
+            "flange fasteners need safe dimensions, a through clearance hole, and a smaller blind pilot",
         ));
     }
 
-    let center_offset = shell_thickness + fasteners.offset_from_shell;
+    let center_offset = (shell_thickness + outer_margin) * 0.5;
     let pilot_end_margin =
         outer_margin - (outer_margin - shell_thickness) * fasteners.pilot_depth / ramp_length;
-    if center_offset + fasteners.pilot_diameter * 0.5 >= pilot_end_margin
+    if center_offset - fasteners.clearance_diameter * 0.5 <= shell_thickness
+        || center_offset + fasteners.pilot_diameter * 0.5 >= pilot_end_margin
         || center_offset + fasteners.clearance_diameter * 0.5 >= outer_margin
     {
         return Err(WingError::InvalidSpec(
@@ -196,7 +193,7 @@ mod tests {
     use crate::{preset, transverse_flange_blank};
 
     #[test]
-    fn clearance_and_pilot_cutters_are_coaxial_and_stop_inside_the_ramp() {
+    fn cutters_are_flange_centered_coaxial_and_stop_inside_the_ramp() {
         let wing = preset("tapered").unwrap();
         let fasteners = TransverseFlangeFastenerSpec::default();
         let cutters =
@@ -204,13 +201,31 @@ mod tests {
                 .unwrap();
 
         assert_eq!(cutters.len(), 4);
-        for cutters in cutters {
+        for (index, cutters) in cutters.into_iter().enumerate() {
             let clearance = cutters.clearance.bounding_box();
             let pilot = cutters.pilot.bounding_box();
+            let chord_fraction = fasteners.chord_fractions[index % fasteners.chord_fractions.len()];
+            let frame = wing_surface_frame(&wing, 200.0, chord_fraction, cutters.surface).unwrap();
+            let seam_normal = transverse_section_normal(&wing, 200.0).unwrap();
+            let radial_direction = normalize_array(add_scaled(
+                frame.outward_normal,
+                seam_normal,
+                -dot(frame.outward_normal, seam_normal),
+            ))
+            .unwrap();
+            let clearance_center = [
+                (clearance.min.x + clearance.max.x) * 0.5,
+                (clearance.min.y + clearance.max.y) * 0.5,
+                (clearance.min.z + clearance.max.z) * 0.5,
+            ];
             assert!((clearance.min.y - 199.5).abs() < 1.0e-9, "{clearance:?}");
             assert!((clearance.max.y - 203.5).abs() < 1.0e-9, "{clearance:?}");
-            assert!((pilot.min.y - 194.0).abs() < 1.0e-9, "{pilot:?}");
+            assert!((pilot.min.y - 196.0).abs() < 1.0e-9, "{pilot:?}");
             assert!((pilot.max.y - 200.5).abs() < 1.0e-9, "{pilot:?}");
+            assert!(
+                (dot(subtract(clearance_center, frame.point), radial_direction) - 9.6).abs()
+                    < 1.0e-9
+            );
             assert!(
                 ((clearance.min.x + clearance.max.x) * 0.5 - (pilot.min.x + pilot.max.x) * 0.5)
                     .abs()
