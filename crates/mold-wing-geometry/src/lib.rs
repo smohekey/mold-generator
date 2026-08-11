@@ -2,12 +2,14 @@ use std::{fmt, fs::File, io::BufWriter, path::Path};
 
 use manifold_rust::{manifold::Manifold, types::MeshGL64};
 
+mod airfoil;
 mod flange_fasteners;
 mod longitudinal_registration;
 mod panel_rivets;
 mod surface_frame;
 mod transverse_registration;
 
+pub use airfoil::{Airfoil, GOE_601, Naca4};
 pub use flange_fasteners::{
     FlangeEndObstructions, FlangeFastenerBand, LongitudinalEdgeFastenerCutter,
     LongitudinalSplitFlangeFastenerCutter, TransverseFlangeFastenerCutters,
@@ -27,27 +29,6 @@ pub use transverse_registration::{
 pub type WingBaseRegistrationSettings = WingTransverseRegistrationSettings;
 pub use transverse_flange_registration_inserts as wing_base_registration_inserts;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Naca4 {
-    pub max_camber: f64,
-    pub camber_position: f64,
-    pub thickness: f64,
-}
-
-impl Naca4 {
-    pub fn parse(code: &str) -> Result<Self, WingError> {
-        if code.len() != 4 || !code.bytes().all(|b| b.is_ascii_digit()) {
-            return Err(WingError::InvalidAirfoil(code.to_owned()));
-        }
-        let digits: Vec<u32> = code.chars().map(|c| c.to_digit(10).unwrap()).collect();
-        Ok(Self {
-            max_camber: digits[0] as f64 / 100.0,
-            camber_position: digits[1] as f64 / 10.0,
-            thickness: (digits[2] * 10 + digits[3]) as f64 / 100.0,
-        })
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 pub struct WingStation {
     pub span: f64,
@@ -59,7 +40,7 @@ pub struct WingStation {
 
 #[derive(Debug, Clone)]
 pub struct WingSpec {
-    pub airfoil: Naca4,
+    pub airfoil: Airfoil,
     pub stations: Vec<WingStation>,
     pub profile_points: usize,
     pub closed_trailing_edge: bool,
@@ -696,7 +677,9 @@ fn transverse_profile_loft(
     sections: &[(f64, f64)],
     name: &'static str,
 ) -> Result<Manifold, WingError> {
-    let section_profile = profile(spec.airfoil, spec.profile_points, spec.closed_trailing_edge);
+    let section_profile = spec
+        .airfoil
+        .profile(spec.profile_points, spec.closed_trailing_edge);
     let loop_len = section_profile.len();
     let mut mesh = MeshGL64 {
         num_prop: 3,
@@ -881,26 +864,10 @@ fn surface_point(
         return Ok(transform_station(station, x, 0.0));
     }
     let normalized_x = x / station.chord;
-    let trailing = if spec.closed_trailing_edge {
-        -0.1036
-    } else {
-        -0.1015
-    };
-    let thickness = 5.0
-        * spec.airfoil.thickness
-        * (0.2969 * normalized_x.sqrt() - 0.1260 * normalized_x - 0.3516 * normalized_x.powi(2)
-            + 0.2843 * normalized_x.powi(3)
-            + trailing * normalized_x.powi(4));
-    let (camber, _) = camber(spec.airfoil, normalized_x);
-    let signed_thickness = match surface {
-        WingSurface::Lower => -thickness,
-        WingSurface::Upper => thickness,
-    };
-    Ok(transform_station(
-        station,
-        x,
-        (camber + signed_thickness) * station.chord,
-    ))
+    let surface_z = spec
+        .airfoil
+        .surface_z(normalized_x, surface, spec.closed_trailing_edge);
+    Ok(transform_station(station, x, surface_z * station.chord))
 }
 
 fn rib_endpoint_x(
@@ -1052,7 +1019,7 @@ pub enum WingError {
 impl fmt::Display for WingError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidAirfoil(code) => write!(f, "invalid NACA 4-digit airfoil: {code}"),
+            Self::InvalidAirfoil(name) => write!(f, "invalid airfoil definition: {name}"),
             Self::InvalidSpec(msg) => write!(f, "invalid wing specification: {msg}"),
             Self::Io(err) => err.fmt(f),
             Self::Geometry(msg) => write!(f, "generated geometry is invalid: {msg}"),
@@ -1069,8 +1036,8 @@ impl From<std::io::Error> for WingError {
 }
 
 pub fn preset(name: &str) -> Result<WingSpec, WingError> {
-    let airfoil = Naca4::parse("2412")?;
-    let elliptical_airfoil = Naca4::parse("2213")?;
+    let airfoil = Airfoil::from(Naca4::parse("2412")?);
+    let elliptical_airfoil = Airfoil::from(Naca4::parse("2213")?);
     let linear = |tip_chord: f64, sweep: f64, dihedral: f64, twist: f64| WingSpec {
         airfoil,
         stations: vec![
@@ -1134,7 +1101,7 @@ pub fn preset(name: &str) -> Result<WingSpec, WingError> {
             let tip_z = bend_z + (tip_span - bend_span) * outer_dihedral_deg.to_radians().tan();
 
             Ok(WingSpec {
-                airfoil,
+                airfoil: GOE_601,
                 stations: vec![
                     WingStation {
                         span: 0.0,
@@ -1179,7 +1146,9 @@ pub fn generate(spec: &WingSpec) -> Result<Manifold, WingError> {
         ));
     }
 
-    let section_profile = profile(spec.airfoil, spec.profile_points, spec.closed_trailing_edge);
+    let section_profile = spec
+        .airfoil
+        .profile(spec.profile_points, spec.closed_trailing_edge);
     let loop_len = section_profile.len();
     let mut mesh = MeshGL64 {
         num_prop: 3,
@@ -1259,52 +1228,6 @@ pub fn write_stl(solid: &Manifold, path: impl AsRef<Path>) -> Result<(), WingErr
     Ok(())
 }
 
-fn profile(naca: Naca4, n: usize, closed_te: bool) -> Vec<(f64, f64)> {
-    let mut upper = Vec::with_capacity(n);
-    let mut lower = Vec::with_capacity(n);
-    for i in 0..n {
-        let beta = std::f64::consts::PI * i as f64 / (n - 1) as f64;
-        let x = 0.5 * (1.0 - beta.cos());
-        let te = if closed_te { -0.1036 } else { -0.1015 };
-        let yt = 5.0
-            * naca.thickness
-            * (0.2969 * x.sqrt() - 0.1260 * x - 0.3516 * x * x
-                + 0.2843 * x * x * x
-                + te * x * x * x * x);
-        let (yc, dy) = camber(naca, x);
-        let theta = dy.atan();
-        upper.push((x - yt * theta.sin(), yc + yt * theta.cos()));
-        lower.push((x + yt * theta.sin(), yc - yt * theta.cos()));
-    }
-
-    // Walk TE -> LE on the upper surface, then LE -> TE on the lower surface.
-    // The leading and trailing edge vertices are shared, not duplicated, so
-    // each loft station is one topological loop rather than coincident edges.
-    let mut out = Vec::with_capacity(2 * n - 2);
-    out.extend(upper.into_iter().rev());
-    out.extend(lower.into_iter().skip(1).take(n - 2));
-    out
-}
-
-fn camber(naca: Naca4, x: f64) -> (f64, f64) {
-    let m = naca.max_camber;
-    let p = naca.camber_position;
-    if m == 0.0 || p == 0.0 {
-        return (0.0, 0.0);
-    }
-    if x < p {
-        (
-            m / (p * p) * (2.0 * p * x - x * x),
-            2.0 * m / (p * p) * (p - x),
-        )
-    } else {
-        (
-            m / ((1.0 - p) * (1.0 - p)) * ((1.0 - 2.0 * p) + 2.0 * p * x - x * x),
-            2.0 * m / ((1.0 - p) * (1.0 - p)) * (p - x),
-        )
-    }
-}
-
 fn normal(v: [stl_io::Vertex; 3]) -> stl_io::Normal {
     let a = [v[1][0] - v[0][0], v[1][1] - v[0][1], v[1][2] - v[0][2]];
     let b = [v[2][0] - v[0][0], v[2][1] - v[0][1], v[2][2] - v[0][2]];
@@ -1362,6 +1285,14 @@ mod tests {
 
         assert!((panel_dihedral(&spec.stations[0], &spec.stations[1]) + 12.0).abs() < 1.0e-9);
         assert!((panel_dihedral(&spec.stations[1], &spec.stations[2]) - 8.0).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn gull_preset_uses_goe_601_at_the_root_and_tip() {
+        let spec = preset("gull").unwrap();
+
+        assert_eq!(spec.airfoil, GOE_601);
+        assert_eq!(spec.airfoil.name(), "Göttingen 601");
     }
 
     #[test]

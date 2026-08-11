@@ -471,6 +471,7 @@ fn generate(generator: WingMoldGenerator) -> Result<(), Box<dyn std::error::Erro
     if let Some(heads) = &rivet_heads {
         cut_surface_details(&kernel, &mut mold, heads)?;
     }
+    clear_part_from_mold(&kernel, &part, &mut mold)?;
     let mut mold = split_mold_into_tiles(&kernel, &spec, mold, &ranges, &tiles)?;
     cut_registration_mating_sockets(
         &kernel,
@@ -501,6 +502,17 @@ fn cut_surface_details(
 ) -> Result<(), mold_manifold::ManifoldKernelError> {
     for piece in mold.negative.iter_mut().chain(&mut mold.positive) {
         *piece = kernel.difference(piece, details)?;
+    }
+    Ok(())
+}
+
+fn clear_part_from_mold(
+    kernel: &ManifoldKernel,
+    part: &ManifoldSolid,
+    mold: &mut SectionedTwoPartMold<ManifoldSolid>,
+) -> Result<(), mold_manifold::ManifoldKernelError> {
+    for piece in mold.negative.iter_mut().chain(&mut mold.positive) {
+        *piece = kernel.difference(piece, part)?;
     }
     Ok(())
 }
@@ -1358,6 +1370,31 @@ mod tests {
 
         assert_eq!(settings.thickness, 4.0);
         assert!(settings.structural_webbing.is_none());
+    }
+
+    #[test]
+    fn final_cavity_recut_removes_part_intrusion_from_every_half() {
+        let kernel = ManifoldKernel;
+        let cuboid = |minimum, maximum| {
+            kernel
+                .cuboid(Bounds3 {
+                    min: Vec3::new(minimum, minimum, minimum),
+                    max: Vec3::new(maximum, maximum, maximum),
+                })
+                .unwrap()
+        };
+        let part = cuboid(0.0, 10.0);
+        let outer = cuboid(-1.0, 11.0);
+        let mut mold = SectionedTwoPartMold {
+            negative: vec![outer.clone()],
+            positive: vec![outer],
+        };
+
+        clear_part_from_mold(&kernel, &part, &mut mold).unwrap();
+
+        for piece in mold.negative.iter().chain(&mold.positive) {
+            assert!(kernel.intersection(piece, &part).unwrap().0.volume() <= 1.0e-9);
+        }
     }
 
     #[test]

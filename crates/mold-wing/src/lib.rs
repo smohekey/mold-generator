@@ -4,7 +4,8 @@ mod generator;
 
 pub use generator::WingMoldGenerator;
 pub use mold_wing_geometry::{
-    FlangeEndObstructions, FlangeFastenerBand, Naca4, TransverseFlangeFastenerLayout,
-    TransverseFlangeFastenerSpec, WingError, WingFlangeFastenerLayout, WingFlangeFastenerSpec,
-    WingPanelRivetSpec, WingSpec, WingStation, WingSurface, preset,
+    Airfoil, FlangeEndObstructions, FlangeFastenerBand, GOE_601, Naca4,
+    TransverseFlangeFastenerLayout, TransverseFlangeFastenerSpec, WingError,
+    WingFlangeFastenerLayout, WingFlangeFastenerSpec, WingPanelRivetSpec, WingSpec, WingStation,
+    WingSurface, preset,
 };
