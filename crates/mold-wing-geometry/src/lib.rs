@@ -1123,34 +1123,43 @@ pub fn preset(name: &str) -> Result<WingSpec, WingError> {
                 closed_trailing_edge: true,
             })
         }
-        "gull" => Ok(WingSpec {
-            airfoil,
-            stations: vec![
-                WingStation {
-                    span: 0.0,
-                    chord: 240.0,
-                    x_offset: 0.0,
-                    z_offset: 0.0,
-                    twist_deg: 0.0,
-                },
-                WingStation {
-                    span: 180.0,
-                    chord: 205.0,
-                    x_offset: 15.0,
-                    z_offset: -55.0,
-                    twist_deg: -1.0,
-                },
-                WingStation {
-                    span: 600.0,
-                    chord: 125.0,
-                    x_offset: 100.0,
-                    z_offset: 35.0,
-                    twist_deg: -3.0,
-                },
-            ],
-            profile_points: 48,
-            closed_trailing_edge: true,
-        }),
+        "gull" => {
+            let bend_span = 180.0;
+            let tip_span = 600.0;
+            let inner_dihedral_deg: f64 = -12.0;
+            let outer_dihedral_deg: f64 = 8.0;
+            let bend_z = bend_span * inner_dihedral_deg.to_radians().tan();
+            let tip_z = bend_z + (tip_span - bend_span) * outer_dihedral_deg.to_radians().tan();
+
+            Ok(WingSpec {
+                airfoil,
+                stations: vec![
+                    WingStation {
+                        span: 0.0,
+                        chord: 240.0,
+                        x_offset: 0.0,
+                        z_offset: 0.0,
+                        twist_deg: 0.0,
+                    },
+                    WingStation {
+                        span: bend_span,
+                        chord: 205.0,
+                        x_offset: 15.0,
+                        z_offset: bend_z,
+                        twist_deg: -1.0,
+                    },
+                    WingStation {
+                        span: tip_span,
+                        chord: 125.0,
+                        x_offset: 100.0,
+                        z_offset: tip_z,
+                        twist_deg: -3.0,
+                    },
+                ],
+                profile_points: 48,
+                closed_trailing_edge: true,
+            })
+        }
         _ => Err(WingError::InvalidSpec("unknown preset")),
     }
 }
@@ -1336,6 +1345,21 @@ mod tests {
         let n = Naca4::parse("0012").unwrap();
         assert_eq!(n.max_camber, 0.0);
         assert_eq!(n.thickness, 0.12);
+    }
+
+    #[test]
+    fn gull_preset_uses_requested_panel_dihedral() {
+        let spec = preset("gull").unwrap();
+        assert_eq!(spec.stations.len(), 3);
+
+        let panel_dihedral = |start: &WingStation, end: &WingStation| {
+            (end.z_offset - start.z_offset)
+                .atan2(end.span - start.span)
+                .to_degrees()
+        };
+
+        assert!((panel_dihedral(&spec.stations[0], &spec.stations[1]) + 12.0).abs() < 1.0e-9);
+        assert!((panel_dihedral(&spec.stations[1], &spec.stations[2]) - 8.0).abs() < 1.0e-9);
     }
 
     #[test]
