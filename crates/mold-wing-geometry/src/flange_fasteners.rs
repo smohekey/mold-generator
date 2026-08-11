@@ -3,15 +3,28 @@ use manifold_rust::{
     manifold::Manifold,
     types::Error as ManifoldError,
 };
+use mold_geometry::EndAnchoredDistribution;
 
 use crate::{
-    WingError, WingSpec, WingSurface, add_scaled, cross_array, dot, normalize_array, subtract,
-    transverse_section_normal, wing_surface_frame,
+    WingError, WingSpec, WingSurface, add_scaled, cross_array, dot, interpolate_station,
+    normalize_array, subtract, transverse_section_normal, wing_surface_frame,
 };
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum TransverseFlangeFastenerLayout {
+    /// Anchor fasteners near both ends of the local seam chord, then distribute
+    /// interior fasteners evenly so no spacing exceeds this distance.
+    MaximumChordSpacing(f64),
+    /// Place fasteners at explicit normalized positions from leading to trailing edge.
+    ChordFractions(Vec<f64>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct TransverseFlangeFastenerSpec {
-    pub chord_fractions: Vec<f64>,
+    /// Chordwise layout applied independently at every transverse seam.
+    pub layout: TransverseFlangeFastenerLayout,
+    /// Screw-head diameter used to keep end fasteners two head diameters from each end.
+    pub head_diameter: f64,
     pub clearance_diameter: f64,
     pub pilot_diameter: f64,
     pub pilot_depth: f64,
@@ -22,7 +35,8 @@ pub struct TransverseFlangeFastenerSpec {
 impl Default for TransverseFlangeFastenerSpec {
     fn default() -> Self {
         Self {
-            chord_fractions: vec![0.25, 0.75],
+            layout: TransverseFlangeFastenerLayout::MaximumChordSpacing(100.0),
+            head_diameter: 6.0,
             clearance_diameter: 3.4,
             pilot_diameter: 2.5,
             pilot_depth: 4.0,
@@ -55,12 +69,13 @@ pub fn transverse_flange_fastener_cutters(
         bed_thickness,
         fasteners,
     )?;
+    let chord_fractions = fastener_chord_fractions(wing, seam_span, fasteners)?;
     let seam_normal = transverse_section_normal(wing, seam_span)?;
     let radial_offset = (shell_thickness + outer_margin) * 0.5;
-    let mut cutters = Vec::with_capacity(fasteners.chord_fractions.len() * 2);
+    let mut cutters = Vec::with_capacity(chord_fractions.len() * 2);
 
     for surface in [WingSurface::Lower, WingSurface::Upper] {
-        for &chord_fraction in &fasteners.chord_fractions {
+        for &chord_fraction in &chord_fractions {
             let frame = wing_surface_frame(wing, seam_span, chord_fraction, surface)?;
             let radial_direction = normalize_array(add_scaled(
                 frame.outward_normal,
@@ -99,6 +114,58 @@ pub fn transverse_flange_fastener_cutters(
     Ok(cutters)
 }
 
+fn fastener_chord_fractions(
+    wing: &WingSpec,
+    seam_span: f64,
+    fasteners: &TransverseFlangeFastenerSpec,
+) -> Result<Vec<f64>, WingError> {
+    match &fasteners.layout {
+        TransverseFlangeFastenerLayout::MaximumChordSpacing(maximum_spacing) => {
+            if !maximum_spacing.is_finite() || *maximum_spacing <= 0.0 {
+                return Err(WingError::InvalidSpec(
+                    "maximum flange fastener spacing must be finite and positive",
+                ));
+            }
+            let chord = interpolate_station(wing, seam_span)?.chord;
+            let positions = EndAnchoredDistribution {
+                end_setback: fasteners.head_diameter * 2.0,
+                maximum_spacing: *maximum_spacing,
+                minimum_positions: 2,
+            }
+            .positions((0.0, chord))
+            .map_err(|_| {
+                WingError::InvalidSpec(
+                    "local chord cannot fit end-anchored flange fasteners at this spacing",
+                )
+            })?;
+            if positions
+                .windows(2)
+                .any(|pair| pair[1] - pair[0] < fasteners.head_diameter)
+            {
+                return Err(WingError::InvalidSpec(
+                    "local chord is too short to keep flange fastener heads separate",
+                ));
+            }
+            Ok(positions
+                .into_iter()
+                .map(|position| position / chord)
+                .collect())
+        }
+        TransverseFlangeFastenerLayout::ChordFractions(chord_fractions) => {
+            if chord_fractions.is_empty()
+                || chord_fractions
+                    .iter()
+                    .any(|fraction| !fraction.is_finite() || *fraction <= 0.0 || *fraction >= 1.0)
+            {
+                return Err(WingError::InvalidSpec(
+                    "flange fastener chord fractions must lie inside the chord",
+                ));
+            }
+            Ok(chord_fractions.clone())
+        }
+    }
+}
+
 fn validate(
     shell_thickness: f64,
     outer_margin: f64,
@@ -106,27 +173,24 @@ fn validate(
     bed_thickness: f64,
     fasteners: &TransverseFlangeFastenerSpec,
 ) -> Result<(), WingError> {
-    if fasteners.chord_fractions.is_empty()
-        || fasteners
-            .chord_fractions
-            .iter()
-            .any(|fraction| !fraction.is_finite() || *fraction <= 0.0 || *fraction >= 1.0)
-        || ![
-            shell_thickness,
-            outer_margin,
-            ramp_length,
-            bed_thickness,
-            fasteners.clearance_diameter,
-            fasteners.pilot_diameter,
-            fasteners.pilot_depth,
-            fasteners.cutter_overtravel,
-        ]
-        .into_iter()
-        .all(f64::is_finite)
+    if ![
+        shell_thickness,
+        outer_margin,
+        ramp_length,
+        bed_thickness,
+        fasteners.head_diameter,
+        fasteners.clearance_diameter,
+        fasteners.pilot_diameter,
+        fasteners.pilot_depth,
+        fasteners.cutter_overtravel,
+    ]
+    .into_iter()
+    .all(f64::is_finite)
         || shell_thickness <= 0.0
         || outer_margin <= shell_thickness
         || ramp_length <= 0.0
         || bed_thickness <= 0.0
+        || fasteners.head_diameter <= fasteners.clearance_diameter
         || fasteners.clearance_diameter <= fasteners.pilot_diameter
         || fasteners.pilot_diameter <= 0.0
         || fasteners.pilot_depth <= 0.0
@@ -142,9 +206,9 @@ fn validate(
     let center_offset = (shell_thickness + outer_margin) * 0.5;
     let pilot_end_margin =
         outer_margin - (outer_margin - shell_thickness) * fasteners.pilot_depth / ramp_length;
-    if center_offset - fasteners.clearance_diameter * 0.5 <= shell_thickness
+    if center_offset - fasteners.head_diameter * 0.5 <= shell_thickness
         || center_offset + fasteners.pilot_diameter * 0.5 >= pilot_end_margin
-        || center_offset + fasteners.clearance_diameter * 0.5 >= outer_margin
+        || center_offset + fasteners.head_diameter * 0.5 >= outer_margin
     {
         return Err(WingError::InvalidSpec(
             "flange fastener holes would break through the ramp edge",
@@ -199,12 +263,13 @@ mod tests {
         let cutters =
             transverse_flange_fastener_cutters(&wing, 200.0, 4.0, 15.2, 12.0, 3.0, &fasteners)
                 .unwrap();
+        let chord_fractions = fastener_chord_fractions(&wing, 200.0, &fasteners).unwrap();
 
-        assert_eq!(cutters.len(), 4);
+        assert_eq!(cutters.len(), 6);
         for (index, cutters) in cutters.into_iter().enumerate() {
             let clearance = cutters.clearance.bounding_box();
             let pilot = cutters.pilot.bounding_box();
-            let chord_fraction = fasteners.chord_fractions[index % fasteners.chord_fractions.len()];
+            let chord_fraction = chord_fractions[index % chord_fractions.len()];
             let frame = wing_surface_frame(&wing, 200.0, chord_fraction, cutters.surface).unwrap();
             let seam_normal = transverse_section_normal(&wing, 200.0).unwrap();
             let radial_direction = normalize_array(add_scaled(
@@ -237,6 +302,45 @@ mod tests {
                     < 1.0e-9
             );
         }
+    }
+
+    #[test]
+    fn maximum_spacing_anchors_ends_and_scales_with_local_chord() {
+        let fasteners = TransverseFlangeFastenerSpec::default();
+        let fractions_for = |chord| {
+            let mut wing = preset("rectangular").unwrap();
+            for station in &mut wing.stations {
+                station.chord = chord;
+            }
+            fastener_chord_fractions(&wing, 200.0, &fasteners)
+                .unwrap()
+                .into_iter()
+                .map(|fraction| fraction * chord)
+                .collect::<Vec<_>>()
+        };
+
+        let short = fractions_for(100.0);
+        assert_eq!(short, vec![12.0, 88.0]);
+
+        let long = fractions_for(500.0);
+        assert_eq!(long.len(), 6);
+        assert!((long[0] - 12.0).abs() < 1.0e-9);
+        assert!((long[5] - 488.0).abs() < 1.0e-9);
+        assert!(long.windows(2).all(|pair| pair[1] - pair[0] <= 100.0));
+    }
+
+    #[test]
+    fn explicit_chord_fractions_remain_available() {
+        let wing = preset("rectangular").unwrap();
+        let fasteners = TransverseFlangeFastenerSpec {
+            layout: TransverseFlangeFastenerLayout::ChordFractions(vec![0.2, 0.5, 0.8]),
+            ..TransverseFlangeFastenerSpec::default()
+        };
+
+        assert_eq!(
+            fastener_chord_fractions(&wing, 200.0, &fasteners).unwrap(),
+            vec![0.2, 0.5, 0.8]
+        );
     }
 
     #[test]

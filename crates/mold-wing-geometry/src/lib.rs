@@ -7,7 +7,7 @@ mod panel_rivets;
 mod surface_frame;
 
 pub use flange_fasteners::{
-    TransverseFlangeFastenerCutters, TransverseFlangeFastenerSpec,
+    TransverseFlangeFastenerCutters, TransverseFlangeFastenerLayout, TransverseFlangeFastenerSpec,
     transverse_flange_fastener_cutters,
 };
 pub use panel_rivets::{WingPanelRivetSpec, panel_rivet_heads};

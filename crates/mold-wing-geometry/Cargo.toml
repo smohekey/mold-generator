@@ -11,4 +11,5 @@ path = "src/main.rs"
 
 [dependencies]
 manifold-rust.workspace = true
+mold-geometry.workspace = true
 stl_io.workspace = true

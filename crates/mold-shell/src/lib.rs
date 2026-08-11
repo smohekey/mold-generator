@@ -1,7 +1,7 @@
 use std::num::NonZeroUsize;
 
 use mold_core::{Axis, SectionedTwoPartMold};
-use mold_geometry::{Bounds3, SolidKernel, Transform3, Vec3};
+use mold_geometry::{Bounds3, EndAnchoredDistribution, SolidKernel, Transform3, Vec3};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WebbingSettings {
@@ -434,26 +434,13 @@ pub struct RibLayout {
 pub fn divide_flange(range: (f64, f64), settings: FlangeDivisionSettings) -> Vec<f64> {
     let edge_margin = settings.fixture_span * settings.edge_margin_ratio;
     let max_spacing = settings.fixture_span * settings.max_spacing_ratio;
-    let usable_start = range.0 + edge_margin;
-    let usable_end = range.1 - edge_margin;
-    let usable_length = (usable_end - usable_start).max(0.0);
-    let spacing_count = if max_spacing > 0.0 {
-        (usable_length / max_spacing).ceil() as usize
-    } else {
-        1
-    };
-    let count = settings.minimum_per_segment.max(spacing_count + 1);
-
-    (0..count)
-        .map(|index| {
-            let t = if count == 1 {
-                0.5
-            } else {
-                index as f64 / (count - 1) as f64
-            };
-            usable_start + usable_length * t
-        })
-        .collect()
+    EndAnchoredDistribution {
+        end_setback: edge_margin,
+        maximum_spacing: max_spacing,
+        minimum_positions: settings.minimum_per_segment,
+    }
+    .positions(range)
+    .unwrap_or_default()
 }
 
 pub fn alternating_rib_layouts(

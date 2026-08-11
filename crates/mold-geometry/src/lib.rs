@@ -1,5 +1,9 @@
 use std::fmt::Debug;
 
+mod end_anchored_distribution;
+
+pub use end_anchored_distribution::{EndAnchoredDistribution, EndAnchoredDistributionError};
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Vec3 {
     pub x: f64,
