@@ -33,6 +33,15 @@ pub struct WingFlangeFastenerSpec {
     pub circular_segments: i32,
 }
 
+/// Length occupied by adjoining geometry at each end of a longitudinal flange.
+///
+/// Automatic layouts keep the complete fastener head beyond each obstruction.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct FlangeEndObstructions {
+    pub start: f64,
+    pub end: f64,
+}
+
 impl Default for WingFlangeFastenerSpec {
     fn default() -> Self {
         Self {
@@ -180,10 +189,11 @@ pub fn longitudinal_edge_fastener_cutters(
     span_range: (f64, f64),
     flange_width: f64,
     half_depth: f64,
+    end_obstructions: FlangeEndObstructions,
     fasteners: &WingFlangeFastenerSpec,
 ) -> Result<Vec<LongitudinalEdgeFastenerCutter>, WingError> {
     validate_through_flange(0.0, flange_width, half_depth, half_depth, fasteners)?;
-    fastener_positions(span_range, fasteners)?
+    fastener_positions_with_end_obstructions(span_range, end_obstructions, fasteners)?
         .into_iter()
         .map(|position| {
             let station = interpolate_station(wing, position)?;
@@ -218,6 +228,7 @@ pub fn longitudinal_split_flange_fastener_cutters(
     attachment_offset: f64,
     flange_width: f64,
     flange_thickness: f64,
+    end_obstructions: FlangeEndObstructions,
     fasteners: &WingFlangeFastenerSpec,
 ) -> Result<Vec<LongitudinalSplitFlangeFastenerCutter>, WingError> {
     validate_through_flange(
@@ -240,7 +251,7 @@ pub fn longitudinal_split_flange_fastener_cutters(
         "longitudinal split flange needs a non-zero outward direction",
     ))?;
     let span_step = ((span_range.1 - span_range.0) * 1.0e-4).max(1.0e-4);
-    fastener_positions(span_range, fasteners)?
+    fastener_positions_with_end_obstructions(span_range, end_obstructions, fasteners)?
         .into_iter()
         .map(|position| {
             let frame = wing_surface_frame(wing, position, chord_fraction, surface)?;
@@ -329,6 +340,31 @@ fn fastener_positions(
     range: (f64, f64),
     fasteners: &WingFlangeFastenerSpec,
 ) -> Result<Vec<f64>, WingError> {
+    fastener_positions_with_end_obstructions(range, FlangeEndObstructions::default(), fasteners)
+}
+
+fn fastener_positions_with_end_obstructions(
+    range: (f64, f64),
+    end_obstructions: FlangeEndObstructions,
+    fasteners: &WingFlangeFastenerSpec,
+) -> Result<Vec<f64>, WingError> {
+    if !range.0.is_finite()
+        || !range.1.is_finite()
+        || range.1 <= range.0
+        || !end_obstructions.start.is_finite()
+        || end_obstructions.start < 0.0
+        || !end_obstructions.end.is_finite()
+        || end_obstructions.end < 0.0
+    {
+        return Err(WingError::InvalidSpec(
+            "flange range and end obstructions must be valid",
+        ));
+    }
+    let head_radius = fasteners.head_diameter * 0.5;
+    let standard_setback = fasteners.head_diameter * 2.0;
+    let start_setback = standard_setback.max(end_obstructions.start + head_radius);
+    let end_setback = standard_setback.max(end_obstructions.end + head_radius);
+
     match &fasteners.layout {
         WingFlangeFastenerLayout::MaximumSpacing(maximum_spacing) => {
             if !maximum_spacing.is_finite() || *maximum_spacing <= 0.0 {
@@ -337,11 +373,11 @@ fn fastener_positions(
                 ));
             }
             let positions = EndAnchoredDistribution {
-                end_setback: fasteners.head_diameter * 2.0,
+                end_setback: 0.0,
                 maximum_spacing: *maximum_spacing,
                 minimum_positions: 2,
             }
-            .positions(range)
+            .positions((range.0 + start_setback, range.1 - end_setback))
             .map_err(|_| {
                 WingError::InvalidSpec("flange cannot fit end-anchored fasteners at this spacing")
             })?;
@@ -367,10 +403,21 @@ fn fastener_positions(
                 ));
             }
             let length = range.1 - range.0;
-            Ok(fractions
+            let positions: Vec<f64> = fractions
                 .iter()
                 .map(|fraction| range.0 + length * fraction)
-                .collect())
+                .collect();
+            let clear_start = range.0 + end_obstructions.start + head_radius;
+            let clear_end = range.1 - end_obstructions.end - head_radius;
+            if positions
+                .iter()
+                .any(|position| *position < clear_start || *position > clear_end)
+            {
+                return Err(WingError::InvalidSpec(
+                    "explicit flange fastener position overlaps an end obstruction",
+                ));
+            }
+            Ok(positions)
         }
     }
 }
@@ -597,6 +644,26 @@ mod tests {
     }
 
     #[test]
+    fn explicit_fastener_position_cannot_overlap_a_sloped_end() {
+        let fasteners = WingFlangeFastenerSpec {
+            layout: WingFlangeFastenerLayout::Fractions(vec![0.25, 0.95]),
+            ..WingFlangeFastenerSpec::default()
+        };
+
+        assert!(
+            fastener_positions_with_end_obstructions(
+                (0.0, 200.0),
+                FlangeEndObstructions {
+                    start: 0.0,
+                    end: 12.0,
+                },
+                &fasteners,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn base_through_cutters_cross_both_mating_flange_bodies() {
         let wing = preset("tapered").unwrap();
         let geometry = wing_base_attachment_geometry(
@@ -647,6 +714,7 @@ mod tests {
                 (0.0, 200.0),
                 12.0,
                 3.0,
+                FlangeEndObstructions::default(),
                 &fasteners,
             )
             .unwrap();
@@ -665,6 +733,29 @@ mod tests {
     }
 
     #[test]
+    fn edge_fastener_head_clears_a_sloped_end() {
+        let wing = preset("rectangular").unwrap();
+        let fasteners = WingFlangeFastenerSpec::default();
+        let cutters = longitudinal_edge_fastener_cutters(
+            &wing,
+            WingEdge::Leading,
+            (0.0, 200.0),
+            12.0,
+            3.0,
+            FlangeEndObstructions {
+                start: 0.0,
+                end: 12.0,
+            },
+            &fasteners,
+        )
+        .unwrap();
+        let positions: Vec<f64> = cutters.iter().map(|cutter| cutter.position).collect();
+
+        assert_eq!(positions, vec![12.0, 98.5, 185.0]);
+        assert_eq!(200.0 - positions[2], 12.0 + fasteners.head_diameter * 0.5);
+    }
+
+    #[test]
     fn longitudinal_split_cutters_cross_the_complete_flange_thickness() {
         let wing = preset("rectangular").unwrap();
         let cutters = longitudinal_split_flange_fastener_cutters(
@@ -676,6 +767,7 @@ mod tests {
             3.2,
             12.0,
             3.0,
+            FlangeEndObstructions::default(),
             &WingFlangeFastenerSpec::default(),
         )
         .unwrap();

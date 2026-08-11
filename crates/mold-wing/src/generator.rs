@@ -15,8 +15,8 @@ use mold_shell::{
     split_with_cumulative_cutters,
 };
 use mold_wing_geometry::{
-    PrintableEnvelope, WingBaseAttachmentSettings, WingEdge, WingFlangeFastenerSpec,
-    WingPanelRivetSpec, WingSpec, WingSurface, chord_region_extended,
+    FlangeEndObstructions, PrintableEnvelope, WingBaseAttachmentSettings, WingEdge,
+    WingFlangeFastenerSpec, WingPanelRivetSpec, WingSpec, WingSurface, chord_region_extended,
     chord_region_with_span_margins, longitudinal_edge_fastener_cutters,
     longitudinal_split_flange_fastener_cutters, panel_rivet_heads, printable_tile_dimensions,
     registration_diamond, sample_longitudinal_surface_path, sampled_chord_band_region,
@@ -287,6 +287,7 @@ fn generate(generator: WingMoldGenerator) -> Result<(), Box<dyn std::error::Erro
         &ranges,
         FLANGE_MARGIN,
         PARTING_FLANGE_HALF_DEPTH,
+        segment_flanges.top_ramp_length(),
         &generator.flange_fasteners,
     )?;
     validate_cutters_intersect_pair(
@@ -577,6 +578,11 @@ fn add_segment_join_flanges(
         }
         for pair in section_tiles.windows(2) {
             let chord_fraction = pair[0].chord.1;
+            let end_obstructions = longitudinal_flange_end_obstructions(
+                section,
+                ranges.len(),
+                settings.top_ramp_length(),
+            );
             let upper_direction =
                 segment_normal(spec, range.0.max(model_start), range.1.min(model_end))?;
             let lower_direction = upper_direction.map(|value| -value);
@@ -626,6 +632,7 @@ fn add_segment_join_flanges(
                 longitudinal_attachment_offset,
                 settings.width,
                 settings.axial_thickness,
+                end_obstructions,
                 fasteners,
             )?;
             let upper_fasteners = longitudinal_split_flange_fastener_cutters(
@@ -637,6 +644,7 @@ fn add_segment_join_flanges(
                 longitudinal_attachment_offset,
                 settings.width,
                 settings.axial_thickness,
+                end_obstructions,
                 fasteners,
             )?;
             for fastener in lower_fasteners {
@@ -754,10 +762,13 @@ fn build_edge_fastener_holes(
     ranges: &[(f64, f64)],
     flange_width: f64,
     half_depth: f64,
+    sloped_end_length: f64,
     fasteners: &WingFlangeFastenerSpec,
 ) -> Result<Vec<EdgeFastenerHole>, Box<dyn std::error::Error>> {
     let mut holes = Vec::new();
     for (section, &range) in ranges.iter().enumerate() {
+        let end_obstructions =
+            longitudinal_flange_end_obstructions(section, ranges.len(), sloped_end_length);
         for edge in [FlangeEdge::Leading, FlangeEdge::Trailing] {
             holes.extend(
                 longitudinal_edge_fastener_cutters(
@@ -766,6 +777,7 @@ fn build_edge_fastener_holes(
                     range,
                     flange_width,
                     half_depth,
+                    end_obstructions,
                     fasteners,
                 )?
                 .into_iter()
@@ -779,6 +791,24 @@ fn build_edge_fastener_holes(
         }
     }
     Ok(holes)
+}
+
+/// Internal sections end against the sloped lateral flange. Their following
+/// sections start against the bed-oriented flange, so only the far end needs
+/// additional fastener-head clearance.
+fn longitudinal_flange_end_obstructions(
+    section: usize,
+    section_count: usize,
+    sloped_end_length: f64,
+) -> FlangeEndObstructions {
+    FlangeEndObstructions {
+        end: if section + 1 < section_count {
+            sloped_end_length
+        } else {
+            0.0
+        },
+        ..Default::default()
+    }
 }
 
 fn build_registration_inserts(
@@ -968,5 +998,20 @@ mod tests {
         let settings = wing_shell_settings(0.35);
 
         assert_eq!(settings.thickness, 4.35);
+    }
+
+    #[test]
+    fn only_internal_section_ends_are_obstructed_by_a_sloped_flange() {
+        assert_eq!(
+            longitudinal_flange_end_obstructions(0, 3, 12.0),
+            FlangeEndObstructions {
+                start: 0.0,
+                end: 12.0,
+            }
+        );
+        assert_eq!(
+            longitudinal_flange_end_obstructions(2, 3, 12.0),
+            FlangeEndObstructions::default()
+        );
     }
 }

@@ -7,7 +7,7 @@ mod panel_rivets;
 mod surface_frame;
 
 pub use flange_fasteners::{
-    LongitudinalEdgeFastenerCutter, LongitudinalSplitFlangeFastenerCutter,
+    FlangeEndObstructions, LongitudinalEdgeFastenerCutter, LongitudinalSplitFlangeFastenerCutter,
     TransverseFlangeFastenerCutters, TransverseFlangeFastenerLayout, TransverseFlangeFastenerSpec,
     TransverseThroughFlangeFastenerCutter, WingFlangeFastenerLayout, WingFlangeFastenerSpec,
     longitudinal_edge_fastener_cutters, longitudinal_split_flange_fastener_cutters,
