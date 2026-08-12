@@ -227,7 +227,7 @@ pub fn longitudinal_edge_fastener_cutters(
 ) -> Result<Vec<LongitudinalEdgeFastenerCutter>, WingError> {
     validate_through_flange(band, half_depth, half_depth, fasteners)?;
     let center_offset = band.center();
-    fastener_positions_with_end_obstructions(span_range, end_obstructions, fasteners)?
+    flange_fastener_positions(span_range, end_obstructions, fasteners)?
         .into_iter()
         .map(|position| {
             let station = interpolate_station(wing, position)?;
@@ -280,7 +280,7 @@ pub fn longitudinal_split_flange_fastener_cutters(
     ))?;
     let center_offset = band.center();
     let span_step = ((span_range.1 - span_range.0) * 1.0e-4).max(1.0e-4);
-    fastener_positions_with_end_obstructions(span_range, end_obstructions, fasteners)?
+    flange_fastener_positions(span_range, end_obstructions, fasteners)?
         .into_iter()
         .map(|position| {
             let frame = wing_surface_frame(wing, position, chord_fraction, surface)?;
@@ -365,10 +365,15 @@ fn fastener_positions(
     range: (f64, f64),
     fasteners: &WingFlangeFastenerSpec,
 ) -> Result<Vec<f64>, WingError> {
-    fastener_positions_with_end_obstructions(range, FlangeEndObstructions::default(), fasteners)
+    flange_fastener_positions(range, FlangeEndObstructions::default(), fasteners)
 }
 
-fn fastener_positions_with_end_obstructions(
+/// Returns the positions available along a flange after reserving room for
+/// adjoining geometry and complete fastener heads at both ends.
+///
+/// Mold planners can use this before selecting a segment boundary so every
+/// planned flange is capable of carrying its configured fasteners.
+pub fn flange_fastener_positions(
     range: (f64, f64),
     end_obstructions: FlangeEndObstructions,
     fasteners: &WingFlangeFastenerSpec,
@@ -652,6 +657,18 @@ mod tests {
     }
 
     #[test]
+    fn maximum_spacing_rejects_a_flange_too_short_for_both_end_fasteners() {
+        assert!(
+            flange_fastener_positions(
+                (582.0, 604.35),
+                FlangeEndObstructions::default(),
+                &WingFlangeFastenerSpec::default(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn explicit_chord_fractions_remain_available() {
         let wing = preset("rectangular").unwrap();
         let fasteners = WingFlangeFastenerSpec {
@@ -679,7 +696,7 @@ mod tests {
         };
 
         assert!(
-            fastener_positions_with_end_obstructions(
+            flange_fastener_positions(
                 (0.0, 200.0),
                 FlangeEndObstructions {
                     start: 0.0,

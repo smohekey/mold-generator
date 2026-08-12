@@ -19,13 +19,14 @@ use mold_wing_geometry::{
     WingBaseAttachmentSettings, WingEdge, WingFlangeFastenerSpec,
     WingLongitudinalRegistrationSettings, WingPanelRivetSpec, WingSpec, WingSurface,
     WingTransverseRegistrationSettings, chord_region_extended, chord_region_with_span_margins,
-    longitudinal_edge_fastener_cutters, longitudinal_split_flange_fastener_cutters,
-    longitudinal_split_flange_registration_inserts, panel_rivet_heads, printable_tile_dimensions,
-    printable_tile_frame, registration_diamond, sample_longitudinal_surface_path,
-    sampled_chord_band_region, segment_normal, transverse_flange_blank,
-    transverse_flange_fastener_cutters, transverse_flange_registration_inserts,
-    transverse_section_normal, transverse_through_flange_fastener_cutters,
-    wing_base_attachment_geometry, wing_segment_boundaries,
+    flange_fastener_positions, longitudinal_edge_fastener_cutters,
+    longitudinal_split_flange_fastener_cutters, longitudinal_split_flange_registration_inserts,
+    panel_rivet_heads, printable_tile_dimensions, printable_tile_frame, registration_diamond,
+    sample_longitudinal_surface_path, sampled_chord_band_region, segment_normal,
+    transverse_flange_blank, transverse_flange_fastener_cutters,
+    transverse_flange_registration_inserts, transverse_section_normal,
+    transverse_through_flange_fastener_cutters, wing_base_attachment_geometry,
+    wing_segment_boundaries,
 };
 
 const FLANGE_MARGIN: f64 = 12.0;
@@ -172,14 +173,28 @@ fn plan_print_tiles(
     boundaries: &[SegmentBoundary],
     settings: TiledSegmentationSettings,
     envelope: PrintableEnvelope,
+    flange_settings: SegmentFlangeSettings,
+    fasteners: &WingFlangeFastenerSpec,
     blocked_tiles: &[PrintTile],
 ) -> Result<Vec<PrintTile>, SegmentationError> {
+    let final_span = boundaries
+        .last()
+        .ok_or(SegmentationError::InvalidSettings(
+            "at least two boundaries are required",
+        ))?
+        .position;
     partition_tiles_for_print_volume(boundaries, settings, |start, end, chord| {
         let tile = PrintTile {
             span: (start, end),
             chord,
         };
-        if blocked_tiles.contains(&tile) {
+        let end_obstructions = longitudinal_flange_end_obstructions(
+            (end - final_span).abs() > 1.0e-9,
+            flange_settings.top_ramp_length(),
+        );
+        if blocked_tiles.contains(&tile)
+            || flange_fastener_positions((start, end), end_obstructions, fasteners).is_err()
+        {
             None
         } else {
             printable_tile_dimensions(spec, start, end, chord, envelope).ok()
@@ -335,6 +350,8 @@ fn generate(generator: WingMoldGenerator) -> Result<(), Box<dyn std::error::Erro
             &boundaries,
             tiled_segmentation,
             envelope,
+            segment_flanges,
+            &generator.flange_fasteners,
             &blocked_tiles,
         )?;
         let mut ranges = Vec::new();
@@ -770,8 +787,7 @@ fn add_segment_join_flanges(
         for pair in section_tiles.windows(2) {
             let chord_fraction = pair[0].chord.1;
             let end_obstructions = longitudinal_flange_end_obstructions(
-                section,
-                ranges.len(),
+                section + 1 < ranges.len(),
                 settings.top_ramp_length(),
             );
             let upper_direction =
@@ -984,7 +1000,7 @@ fn build_edge_fastener_holes(
     let mut holes = Vec::new();
     for (section, &range) in ranges.iter().enumerate() {
         let end_obstructions =
-            longitudinal_flange_end_obstructions(section, ranges.len(), sloped_end_length);
+            longitudinal_flange_end_obstructions(section + 1 < ranges.len(), sloped_end_length);
         for edge in [FlangeEdge::Leading, FlangeEdge::Trailing] {
             holes.extend(
                 longitudinal_edge_fastener_cutters(
@@ -1013,12 +1029,11 @@ fn build_edge_fastener_holes(
 /// sections start against the bed-oriented flange, so only the far end needs
 /// additional fastener-head clearance.
 fn longitudinal_flange_end_obstructions(
-    section: usize,
-    section_count: usize,
+    has_following_section: bool,
     sloped_end_length: f64,
 ) -> FlangeEndObstructions {
     FlangeEndObstructions {
-        end: if section + 1 < section_count {
+        end: if has_following_section {
             sloped_end_length
         } else {
             0.0
@@ -1222,8 +1237,7 @@ fn build_longitudinal_join_registration_inserts(
             ];
             let chord_fraction = pair[0].chord.1;
             let end_obstructions = longitudinal_flange_end_obstructions(
-                section,
-                ranges.len(),
+                section + 1 < ranges.len(),
                 flange_settings.top_ramp_length(),
             );
             let upper_direction =
@@ -1562,11 +1576,30 @@ mod tests {
             web_depth: SegmentFlangeSettings::default().width,
             span_samples: SURFACE_SAMPLES,
         };
-        let initial = plan_print_tiles(&spec, &boundaries, settings, envelope, &[]).unwrap();
+        let flange_settings = SegmentFlangeSettings::default();
+        let fasteners = WingFlangeFastenerSpec::default();
+        let initial = plan_print_tiles(
+            &spec,
+            &boundaries,
+            settings,
+            envelope,
+            flange_settings,
+            &fasteners,
+            &[],
+        )
+        .unwrap();
         let rejected = initial[0];
 
-        let replanned =
-            plan_print_tiles(&spec, &boundaries, settings, envelope, &[rejected]).unwrap();
+        let replanned = plan_print_tiles(
+            &spec,
+            &boundaries,
+            settings,
+            envelope,
+            flange_settings,
+            &fasteners,
+            &[rejected],
+        )
+        .unwrap();
 
         assert!(!replanned.contains(&rejected));
         assert_ne!(replanned, initial);
@@ -1618,6 +1651,8 @@ mod tests {
                 web_depth: SegmentFlangeSettings::default().width,
                 span_samples: SURFACE_SAMPLES,
             },
+            SegmentFlangeSettings::default(),
+            &WingFlangeFastenerSpec::default(),
             &[],
         )
         .unwrap();
@@ -1638,6 +1673,78 @@ mod tests {
     }
 
     #[test]
+    fn spitfire_plan_absorbs_a_tip_too_short_for_flange_fasteners() {
+        let spec = mold_wing_geometry::preset("elliptical").unwrap();
+        let shell_settings = wing_shell_settings(0.35);
+        let flange_settings = SegmentFlangeSettings::default();
+        let fasteners = WingFlangeFastenerSpec::default();
+        let final_span = spec.stations.last().unwrap().span + shell_settings.thickness;
+        let boundaries: Vec<SegmentBoundary> = wing_segment_boundaries(
+            &spec,
+            spec.stations.first().unwrap().span,
+            final_span,
+            CANDIDATE_STEP,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|candidate| SegmentBoundary {
+            position: candidate.position,
+            preference: candidate.deviation,
+        })
+        .collect();
+        let tiles = plan_print_tiles(
+            &spec,
+            &boundaries,
+            TiledSegmentationSettings {
+                span: SegmentationSettings {
+                    print_volume: PrintVolume {
+                        width: 256.0,
+                        depth: 256.0,
+                        height: 256.0,
+                        clearance: 6.0,
+                    },
+                    preferred_segment_count: None,
+                    max_segment_count: 8,
+                },
+                max_longitudinal_segments: 4,
+            },
+            PrintableEnvelope {
+                flange_margin: FLANGE_MARGIN,
+                shell_thickness: shell_settings.thickness,
+                web_depth: flange_settings.width,
+                span_samples: SURFACE_SAMPLES,
+            },
+            flange_settings,
+            &fasteners,
+            &[],
+        )
+        .unwrap();
+        let mut ranges = Vec::new();
+        for tile in &tiles {
+            if ranges.last() != Some(&tile.span) {
+                ranges.push(tile.span);
+            }
+        }
+
+        assert!(
+            !ranges.iter().any(|range| {
+                (range.0 - 582.0).abs() < 1.0e-9 && (range.1 - final_span).abs() < 1.0e-9
+            }),
+            "undersized Spitfire tip survived planning: {ranges:?}"
+        );
+        for (index, range) in ranges.iter().copied().enumerate() {
+            let obstructions = longitudinal_flange_end_obstructions(
+                index + 1 < ranges.len(),
+                flange_settings.top_ramp_length(),
+            );
+            assert!(
+                flange_fastener_positions(range, obstructions, &fasteners).is_ok(),
+                "planned flange cannot carry its fasteners: {range:?}"
+            );
+        }
+    }
+
+    #[test]
     fn wing_shell_adds_surface_detail_height_to_preserve_minimum_wall() {
         let settings = wing_shell_settings(0.35);
 
@@ -1647,14 +1754,14 @@ mod tests {
     #[test]
     fn only_internal_section_ends_are_obstructed_by_a_sloped_flange() {
         assert_eq!(
-            longitudinal_flange_end_obstructions(0, 3, 12.0),
+            longitudinal_flange_end_obstructions(true, 12.0),
             FlangeEndObstructions {
                 start: 0.0,
                 end: 12.0,
             }
         );
         assert_eq!(
-            longitudinal_flange_end_obstructions(2, 3, 12.0),
+            longitudinal_flange_end_obstructions(false, 12.0),
             FlangeEndObstructions::default()
         );
     }

@@ -15,8 +15,9 @@ pub use flange_fasteners::{
     LongitudinalSplitFlangeFastenerCutter, TransverseFlangeFastenerCutters,
     TransverseFlangeFastenerLayout, TransverseFlangeFastenerSpec,
     TransverseThroughFlangeFastenerCutter, WingFlangeFastenerLayout, WingFlangeFastenerSpec,
-    longitudinal_edge_fastener_cutters, longitudinal_split_flange_fastener_cutters,
-    transverse_flange_fastener_cutters, transverse_through_flange_fastener_cutters,
+    flange_fastener_positions, longitudinal_edge_fastener_cutters,
+    longitudinal_split_flange_fastener_cutters, transverse_flange_fastener_cutters,
+    transverse_through_flange_fastener_cutters,
 };
 pub use longitudinal_registration::{
     WingLongitudinalRegistrationSettings, longitudinal_split_flange_registration_inserts,
