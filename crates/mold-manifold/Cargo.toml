@@ -1,0 +1,11 @@
+[package]
+name = "mold-manifold"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+manifold-rust.workspace = true
+stl_io.workspace = true
+mold-geometry.workspace = true

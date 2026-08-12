@@ -1,0 +1,16 @@
+[package]
+name = "mold-shell"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+mold-core.workspace = true
+mold-geometry.workspace = true
+
+[dev-dependencies]
+manifold-rust.workspace = true
+mold-manifold.workspace = true
+mold-3mf.workspace = true
+mold-wing-geometry.workspace = true

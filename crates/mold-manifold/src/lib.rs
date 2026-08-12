@@ -1,0 +1,504 @@
+//! Manifold-backed geometry implementation.
+//!
+//! This crate is the first concrete geometry backend for the mold generator.
+//! It deliberately owns STL conversion as well as the Manifold adapter so
+//! `mold-core` remains independent of both file formats and mesh libraries.
+
+use std::{fmt, fs::File, io::BufWriter, path::Path};
+
+use manifold_rust::{
+    linalg::{Mat3x4, Vec3 as ManifoldVec3},
+    manifold::Manifold,
+    types::{Error as ManifoldError, MeshGL64},
+};
+use mold_geometry::{Bounds3, SolidKernel, Transform3, Vec3};
+
+#[derive(Clone)]
+pub struct ManifoldSolid(pub Manifold);
+
+impl fmt::Debug for ManifoldSolid {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ManifoldSolid")
+            .field("vertices", &self.0.num_vert())
+            .field("triangles", &self.0.num_tri())
+            .field("status", &self.0.status())
+            .finish()
+    }
+}
+
+#[derive(Debug)]
+pub enum ManifoldKernelError {
+    Io(std::io::Error),
+    Geometry(ManifoldError),
+    InvalidBounds(Bounds3),
+    InvalidOffset(f64),
+    InvalidSweep(&'static str),
+    NonAffineTransform,
+}
+
+impl fmt::Display for ManifoldKernelError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(error) => write!(f, "I/O error: {error}"),
+            Self::Geometry(error) => write!(f, "Manifold geometry error: {error}"),
+            Self::InvalidBounds(bounds) => write!(f, "invalid cuboid bounds: {bounds:?}"),
+            Self::InvalidOffset(distance) => {
+                write!(
+                    f,
+                    "offset distance must be finite and greater than zero: {distance}"
+                )
+            }
+            Self::InvalidSweep(message) => write!(f, "invalid swept rib: {message}"),
+            Self::NonAffineTransform => write!(f, "transform must be affine"),
+        }
+    }
+}
+
+impl std::error::Error for ManifoldKernelError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for ManifoldKernelError {
+    fn from(value: std::io::Error) -> Self {
+        Self::Io(value)
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ManifoldKernel;
+
+/// A plane onto which an end of a swept rib is mitered.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SweepEndPlane {
+    /// Any point on the requested end plane.
+    pub point: [f64; 3],
+    /// The requested plane normal; its magnitude and sign do not affect the cut.
+    pub normal: [f64; 3],
+}
+
+impl ManifoldKernel {
+    pub fn import_stl(&self, path: impl AsRef<Path>) -> Result<ManifoldSolid, ManifoldKernelError> {
+        let mut file = File::open(path)?;
+        let stl = stl_io::read_stl(&mut file)?;
+
+        let mut mesh = MeshGL64 {
+            num_prop: 3,
+            ..Default::default()
+        };
+
+        mesh.vert_properties.reserve(stl.vertices.len() * 3);
+        for vertex in &stl.vertices {
+            mesh.vert_properties
+                .extend([vertex[0] as f64, vertex[1] as f64, vertex[2] as f64]);
+        }
+
+        mesh.tri_verts.reserve(stl.faces.len() * 3);
+        for face in &stl.faces {
+            mesh.tri_verts
+                .extend(face.vertices.map(|index| index as u64));
+        }
+
+        let solid = Manifold::from_mesh_gl64(&mesh);
+        self.checked(solid)
+    }
+
+    pub fn export_stl(
+        &self,
+        solid: &ManifoldSolid,
+        path: impl AsRef<Path>,
+    ) -> Result<(), ManifoldKernelError> {
+        self.ensure_ok(&solid.0)?;
+
+        let mesh = solid.0.as_original().get_mesh_gl64(-1);
+        let stride = mesh.num_prop as usize;
+
+        let vertex_at = |index: u64| {
+            let offset = index as usize * stride;
+            stl_io::Vertex::new([
+                mesh.vert_properties[offset] as f32,
+                mesh.vert_properties[offset + 1] as f32,
+                mesh.vert_properties[offset + 2] as f32,
+            ])
+        };
+
+        let mut triangles = Vec::with_capacity(mesh.tri_verts.len() / 3);
+        for indices in mesh.tri_verts.chunks_exact(3) {
+            let vertices = [
+                vertex_at(indices[0]),
+                vertex_at(indices[1]),
+                vertex_at(indices[2]),
+            ];
+            let normal = triangle_normal(vertices[0], vertices[1], vertices[2]);
+            triangles.push(stl_io::Triangle { normal, vertices });
+        }
+
+        let file = File::create(path)?;
+        let mut writer = BufWriter::new(file);
+        stl_io::write_stl(&mut writer, triangles.iter())?;
+        Ok(())
+    }
+
+    pub fn swept_rib(
+        &self,
+        surface_path: &[[f64; 3]],
+        direction: [f64; 3],
+        thickness: f64,
+        depth: f64,
+    ) -> Result<ManifoldSolid, ManifoldKernelError> {
+        self.build_swept_rib(surface_path, direction, thickness, depth, None)
+    }
+
+    /// Sweeps a rib and miters its first and last rings onto explicit planes.
+    pub fn swept_rib_with_end_planes(
+        &self,
+        surface_path: &[[f64; 3]],
+        direction: [f64; 3],
+        thickness: f64,
+        depth: f64,
+        start: SweepEndPlane,
+        end: SweepEndPlane,
+    ) -> Result<ManifoldSolid, ManifoldKernelError> {
+        self.build_swept_rib(
+            surface_path,
+            direction,
+            thickness,
+            depth,
+            Some((start, end)),
+        )
+    }
+
+    fn build_swept_rib(
+        &self,
+        surface_path: &[[f64; 3]],
+        direction: [f64; 3],
+        thickness: f64,
+        depth: f64,
+        end_planes: Option<(SweepEndPlane, SweepEndPlane)>,
+    ) -> Result<ManifoldSolid, ManifoldKernelError> {
+        if surface_path.len() < 2 || thickness <= 0.0 || depth <= 0.0 {
+            return Err(ManifoldKernelError::InvalidSweep(
+                "requires at least two points and positive thickness/depth",
+            ));
+        }
+        let direction = normalize_array(direction).ok_or(ManifoldKernelError::InvalidSweep(
+            "direction must be non-zero",
+        ))?;
+        let half = thickness * 0.5;
+        let mut rings = Vec::with_capacity(surface_path.len());
+        for (index, &center) in surface_path.iter().enumerate() {
+            let before = surface_path[index.saturating_sub(1)];
+            let after = surface_path[(index + 1).min(surface_path.len() - 1)];
+            let tangent = subtract_array(after, before);
+            let side = normalize_array(cross_array(direction, tangent)).ok_or(
+                ManifoldKernelError::InvalidSweep("path tangent is parallel to direction"),
+            )?;
+            let surface_left = add_scaled_array(center, side, -half);
+            let surface_right = add_scaled_array(center, side, half);
+            let outer_left = add_scaled_array(surface_left, direction, depth);
+            let outer_right = add_scaled_array(surface_right, direction, depth);
+            rings.push([surface_left, surface_right, outer_right, outer_left]);
+        }
+
+        if let Some((start, end)) = end_planes {
+            let start_normal = normalize_array(start.normal).ok_or(
+                ManifoldKernelError::InvalidSweep("start plane normal must be non-zero"),
+            )?;
+            let end_normal = normalize_array(end.normal).ok_or(
+                ManifoldKernelError::InvalidSweep("end plane normal must be non-zero"),
+            )?;
+            let second = rings[1];
+            miter_ring_to_plane(&mut rings[0], &second, start.point, start_normal)?;
+            let penultimate = rings[rings.len() - 2];
+            let last = rings
+                .last_mut()
+                .expect("a swept rib has at least two rings");
+            miter_ring_to_plane(last, &penultimate, end.point, end_normal)?;
+        }
+
+        let mut mesh = MeshGL64 {
+            num_prop: 3,
+            ..Default::default()
+        };
+        for ring in rings {
+            for point in ring {
+                mesh.vert_properties.extend(point);
+            }
+        }
+        for index in 0..surface_path.len() - 1 {
+            connect_quad_rings(&mut mesh, (index * 4) as u64, ((index + 1) * 4) as u64);
+        }
+        mesh.tri_verts.extend([0, 2, 1, 0, 3, 2]);
+        let end = ((surface_path.len() - 1) * 4) as u64;
+        mesh.tri_verts
+            .extend([end, end + 1, end + 2, end, end + 2, end + 3]);
+        self.checked(Manifold::from_mesh_gl64(&mesh))
+    }
+
+    fn checked(&self, manifold: Manifold) -> Result<ManifoldSolid, ManifoldKernelError> {
+        self.ensure_ok(&manifold)?;
+        Ok(ManifoldSolid(manifold))
+    }
+
+    fn ensure_ok(&self, manifold: &Manifold) -> Result<(), ManifoldKernelError> {
+        match manifold.status() {
+            ManifoldError::NoError => Ok(()),
+            error => Err(ManifoldKernelError::Geometry(error)),
+        }
+    }
+}
+
+impl SolidKernel for ManifoldKernel {
+    type Solid = ManifoldSolid;
+    type Error = ManifoldKernelError;
+
+    fn bounds(&self, solid: &Self::Solid) -> Result<Bounds3, Self::Error> {
+        self.ensure_ok(&solid.0)?;
+        let bounds = solid.0.bounding_box();
+        Ok(Bounds3 {
+            min: Vec3::new(bounds.min.x, bounds.min.y, bounds.min.z),
+            max: Vec3::new(bounds.max.x, bounds.max.y, bounds.max.z),
+        })
+    }
+
+    fn cuboid(&self, bounds: Bounds3) -> Result<Self::Solid, Self::Error> {
+        let size = ManifoldVec3::new(
+            bounds.max.x - bounds.min.x,
+            bounds.max.y - bounds.min.y,
+            bounds.max.z - bounds.min.z,
+        );
+
+        if !size.x.is_finite()
+            || !size.y.is_finite()
+            || !size.z.is_finite()
+            || size.x <= 0.0
+            || size.y <= 0.0
+            || size.z <= 0.0
+        {
+            return Err(ManifoldKernelError::InvalidBounds(bounds));
+        }
+
+        let solid = Manifold::cube(size, false).translate(ManifoldVec3::new(
+            bounds.min.x,
+            bounds.min.y,
+            bounds.min.z,
+        ));
+        self.checked(solid)
+    }
+
+    fn union(&self, a: &Self::Solid, b: &Self::Solid) -> Result<Self::Solid, Self::Error> {
+        self.checked(a.0.union(&b.0))
+    }
+
+    fn union_attached(
+        &self,
+        base: &Self::Solid,
+        additions: &Self::Solid,
+    ) -> Result<Self::Solid, Self::Error> {
+        let combined = base.0.union(&additions.0);
+        let candidates = combined.decompose();
+        let mut retained: Option<Manifold> = None;
+
+        // Preserve exactly the connected regions represented by the base. A
+        // candidate reinforcement fragment is retained only when it belongs to
+        // the combined component with the greatest overlap for a base component.
+        for base_component in base.0.decompose() {
+            let best = candidates.iter().max_by(|a, b| {
+                a.intersection(&base_component)
+                    .volume()
+                    .total_cmp(&b.intersection(&base_component).volume())
+            });
+            if let Some(best) = best
+                && best.intersection(&base_component).volume() > 1.0e-9
+            {
+                retained = Some(match retained {
+                    Some(result) => result.union(best),
+                    None => best.clone(),
+                });
+            }
+        }
+        self.checked(retained.unwrap_or_else(|| base.0.clone()))
+    }
+
+    fn difference(&self, a: &Self::Solid, b: &Self::Solid) -> Result<Self::Solid, Self::Error> {
+        self.checked(a.0.difference(&b.0))
+    }
+
+    fn intersection(&self, a: &Self::Solid, b: &Self::Solid) -> Result<Self::Solid, Self::Error> {
+        self.checked(a.0.intersection(&b.0))
+    }
+
+    fn offset(&self, solid: &Self::Solid, distance: f64) -> Result<Self::Solid, Self::Error> {
+        if !distance.is_finite() || distance <= 0.0 {
+            return Err(ManifoldKernelError::InvalidOffset(distance));
+        }
+
+        // The Minkowski sum with a sphere is the geometric dilation of the
+        // source solid. Sixteen circular segments keeps the initial mesh
+        // backend reasonably light while producing a smooth enough mold skin;
+        // this can become an explicit quality setting later.
+        let kernel = Manifold::sphere(distance, 16);
+        self.checked(solid.0.minkowski_sum(&kernel))
+    }
+
+    fn transform(
+        &self,
+        solid: &Self::Solid,
+        transform: Transform3,
+    ) -> Result<Self::Solid, Self::Error> {
+        let m = transform.matrix;
+        if m[3] != [0.0, 0.0, 0.0, 1.0] {
+            return Err(ManifoldKernelError::NonAffineTransform);
+        }
+
+        let manifold_transform = Mat3x4::from_cols(
+            ManifoldVec3::new(m[0][0], m[1][0], m[2][0]),
+            ManifoldVec3::new(m[0][1], m[1][1], m[2][1]),
+            ManifoldVec3::new(m[0][2], m[1][2], m[2][2]),
+            ManifoldVec3::new(m[0][3], m[1][3], m[2][3]),
+        );
+        self.checked(solid.0.transform(&manifold_transform))
+    }
+}
+
+fn triangle_normal(a: stl_io::Vertex, b: stl_io::Vertex, c: stl_io::Vertex) -> stl_io::Normal {
+    let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+    let normal = [
+        ab[1] * ac[2] - ab[2] * ac[1],
+        ab[2] * ac[0] - ab[0] * ac[2],
+        ab[0] * ac[1] - ab[1] * ac[0],
+    ];
+    let length = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
+
+    if length > 0.0 {
+        stl_io::Normal::new([normal[0] / length, normal[1] / length, normal[2] / length])
+    } else {
+        stl_io::Normal::new([0.0, 0.0, 0.0])
+    }
+}
+
+fn connect_quad_rings(mesh: &mut MeshGL64, lower: u64, upper: u64) {
+    for index in 0..4_u64 {
+        let next = (index + 1) % 4;
+        mesh.tri_verts
+            .extend([lower + index, upper + next, upper + index]);
+        mesh.tri_verts
+            .extend([lower + index, lower + next, upper + next]);
+    }
+}
+
+fn add_scaled_array(point: [f64; 3], direction: [f64; 3], scale: f64) -> [f64; 3] {
+    [
+        point[0] + direction[0] * scale,
+        point[1] + direction[1] * scale,
+        point[2] + direction[2] * scale,
+    ]
+}
+
+fn subtract_array(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn cross_array(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn dot_array(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn miter_ring_to_plane(
+    ring: &mut [[f64; 3]; 4],
+    adjacent: &[[f64; 3]; 4],
+    plane_point: [f64; 3],
+    plane_normal: [f64; 3],
+) -> Result<(), ManifoldKernelError> {
+    for (point, &adjacent_point) in ring.iter_mut().zip(adjacent) {
+        let rail = subtract_array(adjacent_point, *point);
+        let denominator = dot_array(plane_normal, rail);
+        if denominator.abs() <= f64::EPSILON {
+            return Err(ManifoldKernelError::InvalidSweep(
+                "end plane is parallel to a sweep rail",
+            ));
+        }
+        let distance = dot_array(plane_normal, subtract_array(plane_point, *point)) / denominator;
+        *point = add_scaled_array(*point, rail, distance);
+    }
+    Ok(())
+}
+
+fn normalize_array(vector: [f64; 3]) -> Option<[f64; 3]> {
+    let length = (vector[0].powi(2) + vector[1].powi(2) + vector[2].powi(2)).sqrt();
+    (length > f64::EPSILON).then(|| [vector[0] / length, vector[1] / length, vector[2] / length])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn swept_rib_builds_a_closed_solid_along_a_curved_path() {
+        let kernel = ManifoldKernel;
+        let rib = kernel
+            .swept_rib(
+                &[[0.0, 0.0, 0.0], [5.0, 10.0, 1.0], [12.0, 20.0, 3.0]],
+                [0.0, 0.0, 1.0],
+                1.35,
+                8.0,
+            )
+            .unwrap();
+
+        assert_eq!(rib.0.status(), ManifoldError::NoError);
+        assert!(!rib.0.is_empty());
+        assert!(rib.0.volume() > 0.0);
+    }
+
+    #[test]
+    fn swept_rib_end_planes_miter_every_rail_to_the_requested_normals() {
+        let kernel = ManifoldKernel;
+        let rib = kernel
+            .swept_rib_with_end_planes(
+                &[[0.0, 0.75, 0.0], [2.0, 5.75, 1.0], [4.0, 10.75, 2.0]],
+                [0.0, 1.0, 2.0],
+                1.0,
+                3.0,
+                SweepEndPlane {
+                    point: [0.0, 0.0, 0.0],
+                    normal: [0.0, 1.0, 0.0],
+                },
+                SweepEndPlane {
+                    point: [4.0, 10.0, 2.0],
+                    normal: [0.0, 1.0, 0.0],
+                },
+            )
+            .unwrap();
+        let bounds = kernel.bounds(&rib).unwrap();
+
+        assert_eq!(rib.0.status(), ManifoldError::NoError);
+        assert!((bounds.min.y - 0.0).abs() < 1.0e-9);
+        assert!((bounds.max.y - 10.0).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn swept_rib_rejects_a_zero_direction() {
+        let error = ManifoldKernel
+            .swept_rib(
+                &[[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]],
+                [0.0, 0.0, 0.0],
+                1.35,
+                8.0,
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, ManifoldKernelError::InvalidSweep(_)));
+    }
+}

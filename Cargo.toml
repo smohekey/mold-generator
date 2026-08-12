@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/mold-geometry",
+    "crates/mold-manifold",
+    "crates/mold-core",
+    "crates/mold-shell",
+    "crates/mold-wing-geometry",
+    "crates/mold-wing",
+    "crates/mold-samples",
+    "crates/mold-3mf",
+    "crates/mold-cli",
+]
+
+[workspace.package]
+edition = "2024"
+license = "MPL-2.0"
+rust-version = "1.88"
+
+[workspace.dependencies]
+manifold-rust = "0.13.0"
+stl_io = "0.11.0"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+mold-geometry = { path = "crates/mold-geometry" }
+mold-manifold = { path = "crates/mold-manifold" }
+mold-core = { path = "crates/mold-core" }
+mold-shell = { path = "crates/mold-shell" }
+mold-wing-geometry = { path = "crates/mold-wing-geometry" }
+mold-wing = { path = "crates/mold-wing" }
+mold-samples = { path = "crates/mold-samples" }
+mold-3mf = { path = "crates/mold-3mf" }
