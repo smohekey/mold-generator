@@ -942,21 +942,18 @@ fn rib_endpoint_x(
     }
 }
 
-fn station_axis(a: WingStation, b: WingStation) -> [f64; 3] {
-    normalize_array([
-        b.x_offset - a.x_offset,
-        b.span - a.span,
-        b.z_offset - a.z_offset,
-    ])
-    .expect("stations have strictly increasing spans")
+fn station_centerline_axis(a: WingStation, b: WingStation) -> [f64; 3] {
+    let a = transform_station(&a, a.chord * 0.5, 0.0);
+    let b = transform_station(&b, b.chord * 0.5, 0.0);
+    normalize_array(subtract(b, a)).expect("stations have strictly increasing spans")
 }
 
 fn axial_deviations(spec: &WingSpec) -> Vec<WingSegmentBoundary> {
     spec.stations
         .windows(3)
         .map(|stations| {
-            let incoming = station_axis(stations[0], stations[1]);
-            let outgoing = station_axis(stations[1], stations[2]);
+            let incoming = station_centerline_axis(stations[0], stations[1]);
+            let outgoing = station_centerline_axis(stations[1], stations[2]);
             WingSegmentBoundary {
                 position: stations[1].span,
                 deviation: dot(incoming, outgoing).clamp(-1.0, 1.0).acos(),
@@ -1344,6 +1341,19 @@ mod tests {
 
         assert!((panel_dihedral(&spec.stations[0], &spec.stations[1]) + 12.0).abs() < 1.0e-9);
         assert!((panel_dihedral(&spec.stations[1], &spec.stations[2]) - 8.0).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn axial_deviation_distinguishes_a_panel_bend_from_elliptical_support_stations() {
+        let largest_deviation = |name| {
+            axial_deviations(&preset(name).unwrap())
+                .into_iter()
+                .map(|boundary| boundary.deviation)
+                .fold(0.0_f64, f64::max)
+        };
+
+        assert!(largest_deviation("elliptical") < 2.0_f64.to_radians());
+        assert!(largest_deviation("gull") > 15.0_f64.to_radians());
     }
 
     #[test]

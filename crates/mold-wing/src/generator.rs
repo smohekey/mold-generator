@@ -17,9 +17,9 @@ use mold_shell::{
 use mold_wing_geometry::{
     FlangeEndObstructions, FlangeFastenerBand, PrintableEnvelope, PrintableFrame,
     WingBaseAttachmentSettings, WingEdge, WingFlangeFastenerSpec,
-    WingLongitudinalRegistrationSettings, WingPanelRivetSpec, WingSpec, WingSurface,
-    WingTransverseRegistrationSettings, chord_region_extended, chord_region_with_span_margins,
-    flange_fastener_positions, longitudinal_edge_fastener_cutters,
+    WingLongitudinalRegistrationSettings, WingPanelRivetSpec, WingSegmentBoundary, WingSpec,
+    WingSurface, WingTransverseRegistrationSettings, chord_region_extended,
+    chord_region_with_span_margins, flange_fastener_positions, longitudinal_edge_fastener_cutters,
     longitudinal_split_flange_fastener_cutters, longitudinal_split_flange_registration_inserts,
     panel_rivet_heads, printable_tile_dimensions, printable_tile_frame, registration_diamond,
     sample_longitudinal_surface_path, sampled_chord_band_region, segment_normal,
@@ -34,12 +34,26 @@ const PARTING_FLANGE_HALF_DEPTH: f64 = 3.0;
 const SURFACE_SAMPLES: usize = 24;
 const CANDIDATE_STEP: f64 = 25.0;
 const MINIMUM_WALL_THICKNESS: f64 = 4.0;
+/// Smaller changes describe a smooth loft approximation, not a panel bend
+/// worth sacrificing build-volume utilization to preserve as an exact seam.
+const MINIMUM_PREFERRED_SEAM_DEVIATION: f64 = 5.0 * std::f64::consts::PI / 180.0;
 
 fn wing_shell_settings(surface_detail_height: f64) -> ShellSettings {
     ShellSettings {
         thickness: MINIMUM_WALL_THICKNESS + surface_detail_height,
         structural_webbing: None,
         ..Default::default()
+    }
+}
+
+fn planning_boundary(candidate: WingSegmentBoundary) -> SegmentBoundary {
+    SegmentBoundary {
+        position: candidate.position,
+        preference: if candidate.deviation >= MINIMUM_PREFERRED_SEAM_DEVIATION {
+            candidate.deviation
+        } else {
+            0.0
+        },
     }
 }
 
@@ -332,13 +346,8 @@ fn generate(generator: WingMoldGenerator) -> Result<(), Box<dyn std::error::Erro
         web_depth: segment_flanges.width,
         span_samples: SURFACE_SAMPLES,
     };
-    let boundaries: Vec<SegmentBoundary> = candidates
-        .iter()
-        .map(|candidate| SegmentBoundary {
-            position: candidate.position,
-            preference: candidate.deviation,
-        })
-        .collect();
+    let boundaries: Vec<SegmentBoundary> =
+        candidates.iter().copied().map(planning_boundary).collect();
     let tiled_segmentation = TiledSegmentationSettings {
         span: segmentation,
         max_longitudinal_segments: 4,
@@ -1624,10 +1633,7 @@ mod tests {
         )
         .unwrap()
         .into_iter()
-        .map(|candidate| SegmentBoundary {
-            position: candidate.position,
-            preference: candidate.deviation,
-        })
+        .map(planning_boundary)
         .collect();
         let tiles = plan_print_tiles(
             &spec,
@@ -1679,6 +1685,18 @@ mod tests {
         let flange_settings = SegmentFlangeSettings::default();
         let fasteners = WingFlangeFastenerSpec::default();
         let final_span = spec.stations.last().unwrap().span + shell_settings.thickness;
+        let print_volume = PrintVolume {
+            width: 256.0,
+            depth: 256.0,
+            height: 256.0,
+            clearance: 6.0,
+        };
+        let envelope = PrintableEnvelope {
+            flange_margin: FLANGE_MARGIN,
+            shell_thickness: shell_settings.thickness,
+            web_depth: flange_settings.width,
+            span_samples: SURFACE_SAMPLES,
+        };
         let boundaries: Vec<SegmentBoundary> = wing_segment_boundaries(
             &spec,
             spec.stations.first().unwrap().span,
@@ -1687,33 +1705,20 @@ mod tests {
         )
         .unwrap()
         .into_iter()
-        .map(|candidate| SegmentBoundary {
-            position: candidate.position,
-            preference: candidate.deviation,
-        })
+        .map(planning_boundary)
         .collect();
         let tiles = plan_print_tiles(
             &spec,
             &boundaries,
             TiledSegmentationSettings {
                 span: SegmentationSettings {
-                    print_volume: PrintVolume {
-                        width: 256.0,
-                        depth: 256.0,
-                        height: 256.0,
-                        clearance: 6.0,
-                    },
+                    print_volume,
                     preferred_segment_count: None,
                     max_segment_count: 8,
                 },
                 max_longitudinal_segments: 4,
             },
-            PrintableEnvelope {
-                flange_margin: FLANGE_MARGIN,
-                shell_thickness: shell_settings.thickness,
-                web_depth: flange_settings.width,
-                span_samples: SURFACE_SAMPLES,
-            },
+            envelope,
             flange_settings,
             &fasteners,
             &[],
@@ -1726,6 +1731,21 @@ mod tests {
             }
         }
 
+        assert_eq!(
+            ranges.len(),
+            3,
+            "Spitfire plan is over-segmented: {ranges:?}"
+        );
+        let usable_height = print_volume.height - 2.0 * print_volume.clearance;
+        for tile in &tiles {
+            let dimensions =
+                printable_tile_dimensions(&spec, tile.span.0, tile.span.1, tile.chord, envelope)
+                    .unwrap();
+            assert!(
+                dimensions[2] >= usable_height * 0.75,
+                "Spitfire tile underuses print-oriented Z: {dimensions:?}"
+            );
+        }
         assert!(
             !ranges.iter().any(|range| {
                 (range.0 - 582.0).abs() < 1.0e-9 && (range.1 - final_span).abs() < 1.0e-9
