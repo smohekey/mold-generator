@@ -9,23 +9,23 @@ use mold_geometry::SolidKernel;
 use mold_manifold::{ManifoldKernel, ManifoldSolid, SweepEndPlane};
 use mold_shell::{
     BaseAttachmentGeometry, BaseMoldHalves, FlangeEdge, PartingRegions, PrintTile, PrintVolume,
-    SegmentBoundary, SegmentFlangeSettings, SegmentationSettings, ShellSettings,
+    SegmentBoundary, SegmentFlangeSettings, SegmentationError, SegmentationSettings, ShellSettings,
     TiledSegmentationSettings, attach_base_sealing_profile,
     generate_sectioned_shell_mold_with_parting_ranges, partition_tiles_for_print_volume,
     split_with_cumulative_cutters,
 };
 use mold_wing_geometry::{
-    FlangeEndObstructions, FlangeFastenerBand, PrintableEnvelope, WingBaseAttachmentSettings,
-    WingEdge, WingFlangeFastenerSpec, WingLongitudinalRegistrationSettings, WingPanelRivetSpec,
-    WingSpec, WingSurface, WingTransverseRegistrationSettings, chord_region_extended,
-    chord_region_with_span_margins, longitudinal_edge_fastener_cutters,
-    longitudinal_split_flange_fastener_cutters, longitudinal_split_flange_registration_inserts,
-    panel_rivet_heads, printable_tile_dimensions, registration_diamond,
-    sample_longitudinal_surface_path, sampled_chord_band_region, segment_normal,
-    transverse_flange_blank, transverse_flange_fastener_cutters,
-    transverse_flange_registration_inserts, transverse_section_normal,
-    transverse_through_flange_fastener_cutters, wing_base_attachment_geometry,
-    wing_segment_boundaries,
+    FlangeEndObstructions, FlangeFastenerBand, PrintableEnvelope, PrintableFrame,
+    WingBaseAttachmentSettings, WingEdge, WingFlangeFastenerSpec,
+    WingLongitudinalRegistrationSettings, WingPanelRivetSpec, WingSpec, WingSurface,
+    WingTransverseRegistrationSettings, chord_region_extended, chord_region_with_span_margins,
+    longitudinal_edge_fastener_cutters, longitudinal_split_flange_fastener_cutters,
+    longitudinal_split_flange_registration_inserts, panel_rivet_heads, printable_tile_dimensions,
+    printable_tile_frame, registration_diamond, sample_longitudinal_surface_path,
+    sampled_chord_band_region, segment_normal, transverse_flange_blank,
+    transverse_flange_fastener_cutters, transverse_flange_registration_inserts,
+    transverse_section_normal, transverse_through_flange_fastener_cutters,
+    wing_base_attachment_geometry, wing_segment_boundaries,
 };
 
 const FLANGE_MARGIN: f64 = 12.0;
@@ -159,6 +159,79 @@ impl WingMoldGenerator {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct FinalTileFitFailure {
+    tile_index: usize,
+    tile: PrintTile,
+    half: &'static str,
+    dimensions: [f64; 3],
+}
+
+fn plan_print_tiles(
+    spec: &WingSpec,
+    boundaries: &[SegmentBoundary],
+    settings: TiledSegmentationSettings,
+    envelope: PrintableEnvelope,
+    blocked_tiles: &[PrintTile],
+) -> Result<Vec<PrintTile>, SegmentationError> {
+    partition_tiles_for_print_volume(boundaries, settings, |start, end, chord| {
+        let tile = PrintTile {
+            span: (start, end),
+            chord,
+        };
+        if blocked_tiles.contains(&tile) {
+            None
+        } else {
+            printable_tile_dimensions(spec, start, end, chord, envelope).ok()
+        }
+    })
+}
+
+fn final_tile_fit_failures(
+    spec: &WingSpec,
+    print_volume: PrintVolume,
+    tiles: &[PrintTile],
+    mold: &SectionedTwoPartMold<ManifoldSolid>,
+) -> Result<Vec<FinalTileFitFailure>, Box<dyn std::error::Error>> {
+    if mold.negative.len() != tiles.len() || mold.positive.len() != tiles.len() {
+        return Err("final mold piece count does not match the print plan".into());
+    }
+    let mut failures = Vec::new();
+    for (tile_index, tile) in tiles.iter().copied().enumerate() {
+        let frame = printable_tile_frame(spec, tile.span.0, tile.span.1)?;
+        for (half, pieces) in [("lower", &mold.negative), ("upper", &mold.positive)] {
+            let dimensions = solid_dimensions_in_frame(&pieces[tile_index], frame)?;
+            if !print_volume.fits(dimensions) {
+                failures.push(FinalTileFitFailure {
+                    tile_index,
+                    tile,
+                    half,
+                    dimensions,
+                });
+            }
+        }
+    }
+    Ok(failures)
+}
+
+fn solid_dimensions_in_frame(
+    solid: &ManifoldSolid,
+    frame: PrintableFrame,
+) -> Result<[f64; 3], Box<dyn std::error::Error>> {
+    let mesh = solid.0.as_original().get_mesh_gl64(-1);
+    let stride = mesh.num_prop as usize;
+    if stride < 3 || !mesh.vert_properties.len().is_multiple_of(stride) {
+        return Err("final mold mesh has invalid vertex properties".into());
+    }
+    frame
+        .dimensions(
+            mesh.vert_properties
+                .chunks_exact(stride)
+                .map(|vertex| [vertex[0], vertex[1], vertex[2]]),
+        )
+        .ok_or_else(|| "final mold mesh has no finite vertices".into())
+}
+
 fn generate(generator: WingMoldGenerator) -> Result<(), Box<dyn std::error::Error>> {
     if !generator.model_scale.is_finite() || generator.model_scale <= 0.0 {
         return Err("model scale must be finite and positive".into());
@@ -193,10 +266,6 @@ fn generate(generator: WingMoldGenerator) -> Result<(), Box<dyn std::error::Erro
             .as_ref()
             .map_or(0.0, |rivets| rivets.head_height),
     );
-    mold_wing_geometry::write_stl(
-        &part.0,
-        output.join(format!("{}.stl", generator.artifact_stem)),
-    )?;
 
     let lower_region = ManifoldSolid(chord_region_extended(
         &spec,
@@ -255,244 +324,277 @@ fn generate(generator: WingMoldGenerator) -> Result<(), Box<dyn std::error::Erro
             preference: candidate.deviation,
         })
         .collect();
-    let tiles = partition_tiles_for_print_volume(
-        &boundaries,
-        TiledSegmentationSettings {
-            span: segmentation,
-            max_longitudinal_segments: 4,
-        },
-        |start, end, chord| printable_tile_dimensions(&spec, start, end, chord, envelope).ok(),
-    )?;
-    let mut ranges = Vec::new();
-    for tile in &tiles {
-        if ranges.last() != Some(&tile.span) {
-            ranges.push(tile.span);
-        }
-    }
-    println!(
-        "print-volume-aware segment ranges for {:?}: {ranges:?}",
-        segmentation.print_volume
-    );
-    println!("print tiles: {tiles:?}");
-    for (index, tile) in tiles.iter().enumerate() {
-        println!(
-            "tile {} print dimensions: {:?}",
-            index + 1,
-            printable_tile_dimensions(&spec, tile.span.0, tile.span.1, tile.chord, envelope)?
-        );
-    }
-
-    let registration = RegistrationSettings::default();
-    let base_geometry = wing_base_attachment_geometry(
-        &spec,
-        &base_part.0,
-        WingBaseAttachmentSettings {
-            flange_width: segment_flanges.lateral_flange_margin(shell_settings.thickness),
-            axial_thickness: segment_flanges.axial_thickness,
-        },
-    )?;
-    let base_opening = ManifoldSolid(base_geometry.opening);
-    let mut base_mold_flange = ManifoldSolid(base_geometry.mold_flange);
-    let mut base_sealing_profile_blank = ManifoldSolid(base_geometry.sealing_profile);
-    let edge_fastener_holes = build_edge_fastener_holes(
-        &spec,
-        &ranges,
-        FlangeFastenerBand {
-            inner_margin: shell_settings.thickness,
-            outer_margin: FLANGE_MARGIN,
-        },
-        PARTING_FLANGE_HALF_DEPTH,
-        segment_flanges.top_ramp_length(),
-        &generator.flange_fasteners,
-    )?;
-    validate_cutters_intersect_pair(
-        &kernel,
-        &lower_flange,
-        &upper_flange,
-        edge_fastener_holes.iter().map(|hole| &hole.solid),
-        "longitudinal parting flange hole",
-    )?;
-    let base_fastener_band = FlangeFastenerBand {
-        inner_margin: shell_settings.thickness,
-        outer_margin: segment_flanges.lateral_flange_margin(shell_settings.thickness),
+    let tiled_segmentation = TiledSegmentationSettings {
+        span: segmentation,
+        max_longitudinal_segments: 4,
     };
-    let base_fastener_holes: Vec<BaseFastenerHole> = transverse_through_flange_fastener_cutters(
-        &spec,
-        root_span,
-        base_fastener_band.inner_margin,
-        base_fastener_band.outer_margin,
-        segment_flanges.axial_thickness,
-        segment_flanges.axial_thickness,
-        &generator.flange_fasteners,
-    )?
-    .into_iter()
-    .map(|fastener| BaseFastenerHole {
-        surface: fastener.surface,
-        chord_fraction: fastener.chord_fraction,
-        solid: ManifoldSolid(fastener.cutter),
-    })
-    .collect();
-    let mut inserts = build_registration_inserts(
-        &spec,
-        &ranges,
-        &edge_fastener_holes,
-        generator.flange_fasteners.head_diameter,
-        registration,
-    )?;
-    let segment_insert_start = inserts.len();
-    inserts.extend(build_transverse_join_registration_inserts(
-        &spec,
-        &ranges,
-        &tiles,
-        base_fastener_band,
-        segment_flanges,
-        shell_settings.thickness,
-        &generator.flange_fasteners,
-        WingTransverseRegistrationSettings::default(),
-    )?);
-    inserts.extend(build_longitudinal_join_registration_inserts(
-        &spec,
-        &ranges,
-        &tiles,
-        base_fastener_band,
-        segment_flanges,
-        &generator.flange_fasteners,
-        WingLongitudinalRegistrationSettings::default(),
-    )?);
-    let base_insert_start = inserts.len();
-    inserts.extend(build_base_registration_inserts(
-        &spec,
-        root_span,
-        &ranges,
-        &tiles,
-        base_fastener_band,
-        &base_fastener_holes,
-        generator.flange_fasteners.head_diameter,
-        WingTransverseRegistrationSettings::default(),
-    )?);
-    validate_cutters_intersect_pair(
-        &kernel,
-        &base_mold_flange,
-        &base_sealing_profile_blank,
-        inserts[base_insert_start..]
-            .iter()
-            .map(|insert| &insert.solid),
-        "base registration fixture",
-    )?;
-    validate_disjoint(
-        &kernel,
-        edge_fastener_holes.iter().map(|hole| &hole.solid),
-        inserts[..base_insert_start].iter(),
-        "longitudinal fastener hole overlaps a registration fixture",
-    )?;
-    validate_disjoint(
-        &kernel,
-        base_fastener_holes.iter().map(|hole| &hole.solid),
-        inserts[base_insert_start..].iter(),
-        "base fastener hole overlaps a registration fixture",
-    )?;
-    for cutter in base_fastener_holes.iter().map(|hole| &hole.solid) {
-        cut_required(
-            &kernel,
-            &mut base_mold_flange,
-            cutter,
-            "base mold flange through hole",
+    let mut blocked_tiles = Vec::new();
+    loop {
+        let tiles = plan_print_tiles(
+            &spec,
+            &boundaries,
+            tiled_segmentation,
+            envelope,
+            &blocked_tiles,
         )?;
-        cut_required(
-            &kernel,
-            &mut base_sealing_profile_blank,
-            cutter,
-            "base sealing flange through hole",
+        let mut ranges = Vec::new();
+        for tile in &tiles {
+            if ranges.last() != Some(&tile.span) {
+                ranges.push(tile.span);
+            }
+        }
+        println!(
+            "candidate print-volume-aware segment ranges for {:?}: {ranges:?}",
+            segmentation.print_volume
+        );
+        println!("candidate print tiles: {tiles:?}");
+        for (index, tile) in tiles.iter().enumerate() {
+            println!(
+                "candidate tile {} estimated print dimensions: {:?}",
+                index + 1,
+                printable_tile_dimensions(&spec, tile.span.0, tile.span.1, tile.chord, envelope)?
+            );
+        }
+
+        let registration = RegistrationSettings::default();
+        let base_geometry = wing_base_attachment_geometry(
+            &spec,
+            &base_part.0,
+            WingBaseAttachmentSettings {
+                flange_width: segment_flanges.lateral_flange_margin(shell_settings.thickness),
+                axial_thickness: segment_flanges.axial_thickness,
+            },
         )?;
-    }
-    println!(
-        "placed {} registration inserts ({} segment join, {} base)",
-        inserts.len(),
-        base_insert_start - segment_insert_start,
-        inserts.len() - base_insert_start
-    );
-    let socket_cutters: Vec<&ManifoldSolid> = inserts[..segment_insert_start]
-        .iter()
-        .map(|insert| &insert.solid)
-        .chain(
+        let base_opening = ManifoldSolid(base_geometry.opening);
+        let mut base_mold_flange = ManifoldSolid(base_geometry.mold_flange);
+        let mut base_sealing_profile_blank = ManifoldSolid(base_geometry.sealing_profile);
+        let edge_fastener_holes = build_edge_fastener_holes(
+            &spec,
+            &ranges,
+            FlangeFastenerBand {
+                inner_margin: shell_settings.thickness,
+                outer_margin: FLANGE_MARGIN,
+            },
+            PARTING_FLANGE_HALF_DEPTH,
+            segment_flanges.top_ramp_length(),
+            &generator.flange_fasteners,
+        )?;
+        validate_cutters_intersect_pair(
+            &kernel,
+            &lower_flange,
+            &upper_flange,
+            edge_fastener_holes.iter().map(|hole| &hole.solid),
+            "longitudinal parting flange hole",
+        )?;
+        let base_fastener_band = FlangeFastenerBand {
+            inner_margin: shell_settings.thickness,
+            outer_margin: segment_flanges.lateral_flange_margin(shell_settings.thickness),
+        };
+        let base_fastener_holes: Vec<BaseFastenerHole> =
+            transverse_through_flange_fastener_cutters(
+                &spec,
+                root_span,
+                base_fastener_band.inner_margin,
+                base_fastener_band.outer_margin,
+                segment_flanges.axial_thickness,
+                segment_flanges.axial_thickness,
+                &generator.flange_fasteners,
+            )?
+            .into_iter()
+            .map(|fastener| BaseFastenerHole {
+                surface: fastener.surface,
+                chord_fraction: fastener.chord_fraction,
+                solid: ManifoldSolid(fastener.cutter),
+            })
+            .collect();
+        let mut inserts = build_registration_inserts(
+            &spec,
+            &ranges,
+            &edge_fastener_holes,
+            generator.flange_fasteners.head_diameter,
+            registration,
+        )?;
+        let segment_insert_start = inserts.len();
+        inserts.extend(build_transverse_join_registration_inserts(
+            &spec,
+            &ranges,
+            &tiles,
+            base_fastener_band,
+            segment_flanges,
+            shell_settings.thickness,
+            &generator.flange_fasteners,
+            WingTransverseRegistrationSettings::default(),
+        )?);
+        inserts.extend(build_longitudinal_join_registration_inserts(
+            &spec,
+            &ranges,
+            &tiles,
+            base_fastener_band,
+            segment_flanges,
+            &generator.flange_fasteners,
+            WingLongitudinalRegistrationSettings::default(),
+        )?);
+        let base_insert_start = inserts.len();
+        inserts.extend(build_base_registration_inserts(
+            &spec,
+            root_span,
+            &ranges,
+            &tiles,
+            base_fastener_band,
+            &base_fastener_holes,
+            generator.flange_fasteners.head_diameter,
+            WingTransverseRegistrationSettings::default(),
+        )?);
+        validate_cutters_intersect_pair(
+            &kernel,
+            &base_mold_flange,
+            &base_sealing_profile_blank,
             inserts[base_insert_start..]
                 .iter()
                 .map(|insert| &insert.solid),
-        )
-        .chain(edge_fastener_holes.iter().map(|hole| &hole.solid))
-        .collect();
-    let base_socket_cutters: Vec<&ManifoldSolid> = inserts[base_insert_start..]
-        .iter()
-        .map(|insert| &insert.solid)
-        .collect();
-    let mut mold = generate_sectioned_shell_mold_with_parting_ranges(
-        &kernel,
-        &base_part,
-        PartingRegions {
-            negative: &lower_region,
-            positive: &upper_region,
-            negative_flange: Some(&lower_flange),
-            positive_flange: Some(&upper_flange),
-            negative_sockets: &socket_cutters,
-            positive_sockets: &socket_cutters,
-            negative_webbing_exclusions: &[],
-            positive_webbing_exclusions: &[],
-        },
-        Axis::Y,
-        &ranges,
-        shell_settings,
-    )?;
-    let base_sealing_profile = attach_base_sealing_profile(
-        &kernel,
-        BaseMoldHalves::first_in(&mut mold).ok_or("mold has no root segments")?,
-        BaseAttachmentGeometry {
-            opening: &base_opening,
-            mold_flange: &base_mold_flange,
-            sealing_profile: &base_sealing_profile_blank,
-            negative_region: &lower_region,
-            positive_region: &upper_region,
-            sockets: &base_socket_cutters,
-        },
-    )?;
-    add_segment_join_flanges(
-        &kernel,
-        &spec,
-        &part,
-        &lower_region,
-        &upper_region,
-        &mut mold,
-        &ranges,
-        &tiles,
-        segment_flanges,
-        shell_settings.thickness,
-        &generator.flange_fasteners,
-        &socket_cutters,
-    )?;
-    if let Some(heads) = &rivet_heads {
-        cut_surface_details(&kernel, &mut mold, heads)?;
+            "base registration fixture",
+        )?;
+        validate_disjoint(
+            &kernel,
+            edge_fastener_holes.iter().map(|hole| &hole.solid),
+            inserts[..base_insert_start].iter(),
+            "longitudinal fastener hole overlaps a registration fixture",
+        )?;
+        validate_disjoint(
+            &kernel,
+            base_fastener_holes.iter().map(|hole| &hole.solid),
+            inserts[base_insert_start..].iter(),
+            "base fastener hole overlaps a registration fixture",
+        )?;
+        for cutter in base_fastener_holes.iter().map(|hole| &hole.solid) {
+            cut_required(
+                &kernel,
+                &mut base_mold_flange,
+                cutter,
+                "base mold flange through hole",
+            )?;
+            cut_required(
+                &kernel,
+                &mut base_sealing_profile_blank,
+                cutter,
+                "base sealing flange through hole",
+            )?;
+        }
+        println!(
+            "placed {} registration inserts ({} segment join, {} base)",
+            inserts.len(),
+            base_insert_start - segment_insert_start,
+            inserts.len() - base_insert_start
+        );
+        let socket_cutters: Vec<&ManifoldSolid> = inserts[..segment_insert_start]
+            .iter()
+            .map(|insert| &insert.solid)
+            .chain(
+                inserts[base_insert_start..]
+                    .iter()
+                    .map(|insert| &insert.solid),
+            )
+            .chain(edge_fastener_holes.iter().map(|hole| &hole.solid))
+            .collect();
+        let base_socket_cutters: Vec<&ManifoldSolid> = inserts[base_insert_start..]
+            .iter()
+            .map(|insert| &insert.solid)
+            .collect();
+        let mut mold = generate_sectioned_shell_mold_with_parting_ranges(
+            &kernel,
+            &base_part,
+            PartingRegions {
+                negative: &lower_region,
+                positive: &upper_region,
+                negative_flange: Some(&lower_flange),
+                positive_flange: Some(&upper_flange),
+                negative_sockets: &socket_cutters,
+                positive_sockets: &socket_cutters,
+                negative_webbing_exclusions: &[],
+                positive_webbing_exclusions: &[],
+            },
+            Axis::Y,
+            &ranges,
+            shell_settings,
+        )?;
+        let base_sealing_profile = attach_base_sealing_profile(
+            &kernel,
+            BaseMoldHalves::first_in(&mut mold).ok_or("mold has no root segments")?,
+            BaseAttachmentGeometry {
+                opening: &base_opening,
+                mold_flange: &base_mold_flange,
+                sealing_profile: &base_sealing_profile_blank,
+                negative_region: &lower_region,
+                positive_region: &upper_region,
+                sockets: &base_socket_cutters,
+            },
+        )?;
+        add_segment_join_flanges(
+            &kernel,
+            &spec,
+            &part,
+            &lower_region,
+            &upper_region,
+            &mut mold,
+            &ranges,
+            &tiles,
+            segment_flanges,
+            shell_settings.thickness,
+            &generator.flange_fasteners,
+            &socket_cutters,
+        )?;
+        if let Some(heads) = &rivet_heads {
+            cut_surface_details(&kernel, &mut mold, heads)?;
+        }
+        clear_part_from_mold(&kernel, &part, &mut mold)?;
+        let mut mold = split_mold_into_tiles(&kernel, &spec, mold, &ranges, &tiles)?;
+        cut_registration_mating_sockets(
+            &kernel,
+            &mut mold,
+            &inserts[segment_insert_start..base_insert_start],
+        )?;
+        let fit_failures =
+            final_tile_fit_failures(&spec, segmentation.print_volume, &tiles, &mold)?;
+        if !fit_failures.is_empty() {
+            for failure in fit_failures {
+                println!(
+                    "rejecting final {} tile {} {:?}: measured dimensions {:?} exceed {:?}",
+                    failure.half,
+                    failure.tile_index + 1,
+                    failure.tile,
+                    failure.dimensions,
+                    segmentation.print_volume
+                );
+                if !blocked_tiles.contains(&failure.tile) {
+                    blocked_tiles.push(failure.tile);
+                }
+            }
+            continue;
+        }
+        println!(
+            "accepted {} print tiles after measuring both final mold halves",
+            tiles.len()
+        );
+        validate_no_part_intrusion(&part, &mold)?;
+        validate_root_alignment(&kernel, &part, &mold, &base_sealing_profile)?;
+        mold_wing_geometry::write_stl(
+            &part.0,
+            output.join(format!("{}.stl", generator.artifact_stem)),
+        )?;
+        export_artifacts(
+            &kernel,
+            MoldArtifacts {
+                output,
+                part: &part,
+                mold: &mold,
+                base_sealing_profile: &base_sealing_profile,
+                inserts: &inserts,
+                artifact_stem: &generator.artifact_stem,
+                assembly_title: &generator.assembly_title,
+            },
+        )?;
+        return Ok(());
     }
-    clear_part_from_mold(&kernel, &part, &mut mold)?;
-    let mut mold = split_mold_into_tiles(&kernel, &spec, mold, &ranges, &tiles)?;
-    cut_registration_mating_sockets(
-        &kernel,
-        &mut mold,
-        &inserts[segment_insert_start..base_insert_start],
-    )?;
-    validate_no_part_intrusion(&part, &mold)?;
-    validate_root_alignment(&kernel, &part, &mold, &base_sealing_profile)?;
-    export_artifacts(
-        &kernel,
-        MoldArtifacts {
-            output,
-            part: &part,
-            mold: &mold,
-            base_sealing_profile: &base_sealing_profile,
-            inserts: &inserts,
-            artifact_stem: &generator.artifact_stem,
-            assembly_title: &generator.assembly_title,
-        },
-    )?;
-    Ok(())
 }
 
 fn cut_surface_details(
@@ -1395,6 +1497,132 @@ mod tests {
         for piece in mold.negative.iter().chain(&mold.positive) {
             assert!(kernel.intersection(piece, &part).unwrap().0.volume() <= 1.0e-9);
         }
+    }
+
+    #[test]
+    fn final_fit_check_rejects_actual_meshes_that_exceed_the_estimate() {
+        let kernel = ManifoldKernel;
+        let oversized = kernel
+            .cuboid(Bounds3 {
+                min: Vec3::new(0.0, 0.0, 0.0),
+                max: Vec3::new(400.0, 100.0, 20.0),
+            })
+            .unwrap();
+        let tile = PrintTile {
+            span: (0.0, 100.0),
+            chord: (0.0, 1.0),
+        };
+        let mold = SectionedTwoPartMold {
+            negative: vec![oversized.clone()],
+            positive: vec![oversized],
+        };
+        let failures = final_tile_fit_failures(
+            &mold_wing_geometry::preset("rectangular").unwrap(),
+            PrintVolume {
+                width: 256.0,
+                depth: 256.0,
+                height: 256.0,
+                clearance: 6.0,
+            },
+            &[tile],
+            &mold,
+        )
+        .unwrap();
+
+        assert_eq!(failures.len(), 2);
+        assert!(failures.iter().all(|failure| failure.tile == tile));
+        assert!(failures.iter().all(|failure| failure.dimensions[0] > 244.0));
+    }
+
+    #[test]
+    fn rejected_estimated_tile_is_excluded_from_the_next_plan() {
+        let spec = mold_wing_geometry::preset("rectangular").unwrap();
+        let boundaries: Vec<SegmentBoundary> = (0..=6)
+            .map(|index| SegmentBoundary {
+                position: index as f64 * 100.0,
+                preference: 0.0,
+            })
+            .collect();
+        let settings = TiledSegmentationSettings {
+            span: SegmentationSettings {
+                print_volume: PrintVolume {
+                    width: 256.0,
+                    depth: 256.0,
+                    height: 256.0,
+                    clearance: 6.0,
+                },
+                preferred_segment_count: None,
+                max_segment_count: 8,
+            },
+            max_longitudinal_segments: 4,
+        };
+        let envelope = PrintableEnvelope {
+            flange_margin: FLANGE_MARGIN,
+            shell_thickness: 4.0,
+            web_depth: SegmentFlangeSettings::default().width,
+            span_samples: SURFACE_SAMPLES,
+        };
+        let initial = plan_print_tiles(&spec, &boundaries, settings, envelope, &[]).unwrap();
+        let rejected = initial[0];
+
+        let replanned =
+            plan_print_tiles(&spec, &boundaries, settings, envelope, &[rejected]).unwrap();
+
+        assert!(!replanned.contains(&rejected));
+        assert_ne!(replanned, initial);
+    }
+
+    #[test]
+    fn scaled_gull_sample_requires_more_than_five_print_tiles() {
+        let mut spec = mold_wing_geometry::preset("gull").unwrap();
+        for station in &mut spec.stations {
+            station.span *= 1.37;
+            station.chord *= 1.37;
+            station.x_offset *= 1.37;
+            station.z_offset *= 1.37;
+        }
+        spec.profile_points = 24;
+        let shell_settings = wing_shell_settings(0.0);
+        let boundaries: Vec<SegmentBoundary> = wing_segment_boundaries(
+            &spec,
+            spec.stations.first().unwrap().span,
+            spec.stations.last().unwrap().span + shell_settings.thickness,
+            CANDIDATE_STEP,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|candidate| SegmentBoundary {
+            position: candidate.position,
+            preference: candidate.deviation,
+        })
+        .collect();
+        let tiles = plan_print_tiles(
+            &spec,
+            &boundaries,
+            TiledSegmentationSettings {
+                span: SegmentationSettings {
+                    print_volume: PrintVolume {
+                        width: 256.0,
+                        depth: 256.0,
+                        height: 256.0,
+                        clearance: 6.0,
+                    },
+                    preferred_segment_count: None,
+                    max_segment_count: 8,
+                },
+                max_longitudinal_segments: 4,
+            },
+            PrintableEnvelope {
+                flange_margin: FLANGE_MARGIN,
+                shell_thickness: shell_settings.thickness,
+                web_depth: SegmentFlangeSettings::default().width,
+                span_samples: SURFACE_SAMPLES,
+            },
+            &[],
+        )
+        .unwrap();
+
+        assert!(tiles.len() > 5, "unexpected five-tile plan: {tiles:?}");
     }
 
     #[test]

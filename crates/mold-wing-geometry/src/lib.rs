@@ -85,6 +85,28 @@ pub struct PrintableEnvelope {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PrintableFrame {
+    width: [f64; 3],
+    depth: [f64; 3],
+    height: [f64; 3],
+}
+
+impl PrintableFrame {
+    pub fn dimensions(self, points: impl IntoIterator<Item = [f64; 3]>) -> Option<[f64; 3]> {
+        let mut bounds = ProjectionBounds::default();
+        let mut point_count = 0;
+        for point in points {
+            if !point.iter().all(|coordinate| coordinate.is_finite()) {
+                return None;
+            }
+            bounds.include(point, self.width, self.depth, self.height);
+            point_count += 1;
+        }
+        (point_count > 0).then(|| bounds.dimensions())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WingBaseAttachmentSettings {
     pub flange_width: f64,
     pub axial_thickness: f64,
@@ -150,6 +172,15 @@ pub fn printable_segment_dimensions(
     printable_tile_dimensions(spec, start_span, end_span, (0.0, 1.0), envelope)
 }
 
+pub fn printable_tile_frame(
+    spec: &WingSpec,
+    start_span: f64,
+    end_span: f64,
+) -> Result<PrintableFrame, WingError> {
+    let (_, _, frame) = printable_frame(spec, start_span, end_span)?;
+    Ok(frame)
+}
+
 pub fn printable_tile_dimensions(
     spec: &WingSpec,
     start_span: f64,
@@ -172,37 +203,12 @@ pub fn printable_tile_dimensions(
             "tile chord range must be increasing and within zero to one",
         ));
     }
-    let model_start = spec
-        .stations
-        .first()
-        .ok_or(WingError::InvalidSpec("wing has no stations"))?
-        .span;
-    let model_end = spec
-        .stations
-        .last()
-        .ok_or(WingError::InvalidSpec("wing has no stations"))?
-        .span;
-    let clamped_start = start_span.clamp(model_start, model_end);
-    let clamped_end = end_span.clamp(model_start, model_end);
-    if clamped_end <= clamped_start {
-        return Err(WingError::InvalidSpec("segment lies outside the wing"));
-    }
-    let start = interpolate_station(spec, clamped_start)?;
-    let end = interpolate_station(spec, clamped_end)?;
-    let center = interpolate_station(spec, (clamped_start + clamped_end) * 0.5)?;
-    let vertical = normalize_array(subtract(
-        transform_station(&end, end.chord * 0.25, 0.0),
-        transform_station(&start, start.chord * 0.25, 0.0),
-    ))
-    .ok_or(WingError::InvalidSpec("cannot determine print axis"))?;
-    let chord = subtract(
-        transform_station(&center, center.chord, 0.0),
-        transform_station(&center, 0.0, 0.0),
-    );
-    let width = normalize_array(subtract(chord, scale(vertical, dot(chord, vertical))))
-        .ok_or(WingError::InvalidSpec("cannot determine print width axis"))?;
-    let depth = normalize_array(cross_array(vertical, width))
-        .ok_or(WingError::InvalidSpec("cannot determine print depth axis"))?;
+    let (clamped_start, clamped_end, frame) = printable_frame(spec, start_span, end_span)?;
+    let PrintableFrame {
+        width,
+        depth,
+        height: vertical,
+    } = frame;
     let outward = envelope.shell_thickness + envelope.web_depth;
     let mut lower = ProjectionBounds::default();
     let mut upper = ProjectionBounds::default();
@@ -260,6 +266,58 @@ pub fn printable_tile_dimensions(
         lower[1].max(upper[1]),
         lower[2].max(upper[2]) + clipping_overhang,
     ])
+}
+
+fn printable_frame(
+    spec: &WingSpec,
+    start_span: f64,
+    end_span: f64,
+) -> Result<(f64, f64, PrintableFrame), WingError> {
+    if end_span <= start_span {
+        return Err(WingError::InvalidSpec(
+            "printable frame needs a positive span",
+        ));
+    }
+    let model_start = spec
+        .stations
+        .first()
+        .ok_or(WingError::InvalidSpec("wing has no stations"))?
+        .span;
+    let model_end = spec
+        .stations
+        .last()
+        .ok_or(WingError::InvalidSpec("wing has no stations"))?
+        .span;
+    let clamped_start = start_span.clamp(model_start, model_end);
+    let clamped_end = end_span.clamp(model_start, model_end);
+    if clamped_end <= clamped_start {
+        return Err(WingError::InvalidSpec("segment lies outside the wing"));
+    }
+    let start = interpolate_station(spec, clamped_start)?;
+    let end = interpolate_station(spec, clamped_end)?;
+    let center = interpolate_station(spec, (clamped_start + clamped_end) * 0.5)?;
+    let vertical = normalize_array(subtract(
+        transform_station(&end, end.chord * 0.25, 0.0),
+        transform_station(&start, start.chord * 0.25, 0.0),
+    ))
+    .ok_or(WingError::InvalidSpec("cannot determine print axis"))?;
+    let chord = subtract(
+        transform_station(&center, center.chord, 0.0),
+        transform_station(&center, 0.0, 0.0),
+    );
+    let width = normalize_array(subtract(chord, scale(vertical, dot(chord, vertical))))
+        .ok_or(WingError::InvalidSpec("cannot determine print width axis"))?;
+    let depth = normalize_array(cross_array(vertical, width))
+        .ok_or(WingError::InvalidSpec("cannot determine print depth axis"))?;
+    Ok((
+        clamped_start,
+        clamped_end,
+        PrintableFrame {
+            width,
+            depth,
+            height: vertical,
+        },
+    ))
 }
 
 #[derive(Debug, Clone, Copy)]

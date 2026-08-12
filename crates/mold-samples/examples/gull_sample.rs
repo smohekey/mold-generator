@@ -7,6 +7,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "gull-wing",
         "Gull wing mold validation assembly",
     )
-    .with_model_scale(1.2)
+    .with_model_scale(1.37)
     .generate()
 }
