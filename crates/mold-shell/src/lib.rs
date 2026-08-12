@@ -209,9 +209,11 @@ fn validate_segmentation(
     Ok(())
 }
 
-/// Finds a printable two-dimensional partition. Each span region independently
-/// chooses the fewest equal-width longitudinal bands that fit, so wide root
-/// regions do not force unnecessary cuts into narrower outboard regions.
+/// Finds a printable two-dimensional partition. Geometrically preferred span
+/// boundaries are retained before minimizing the automatically planned tile
+/// count. Each span region independently chooses the fewest equal-width
+/// longitudinal bands that fit, so wide root regions do not force unnecessary
+/// cuts into narrower outboard regions.
 pub fn partition_tiles_for_print_volume<F>(
     boundaries: &[SegmentBoundary],
     settings: TiledSegmentationSettings,
@@ -287,10 +289,10 @@ where
                 };
                 let entry = &mut routes[used + 1][next];
                 if entry.as_ref().is_none_or(|current| {
-                    candidate.tiles < current.tiles
-                        || (candidate.tiles == current.tiles
-                            && (candidate.preference > current.preference
-                                || (candidate.preference == current.preference
+                    candidate.preference > current.preference
+                        || (candidate.preference == current.preference
+                            && (candidate.tiles < current.tiles
+                                || (candidate.tiles == current.tiles
                                     && candidate.shortest_span > current.shortest_span)))
                 }) {
                     *entry = Some(candidate);
@@ -305,14 +307,16 @@ where
         .skip(1)
         .filter_map(|(span_count, routes)| routes[end].take().map(|route| (span_count, route)))
         .min_by(|(a_count, a), (b_count, b)| {
-            a.tiles
-                .cmp(&b.tiles)
-                .then_with(|| match preferred {
-                    Some(target) => a_count.abs_diff(target).cmp(&b_count.abs_diff(target)),
-                    None => a_count.cmp(b_count),
-                })
-                .then_with(|| b.preference.total_cmp(&a.preference))
-                .then_with(|| b.shortest_span.total_cmp(&a.shortest_span))
+            match preferred {
+                Some(target) => a_count.abs_diff(target).cmp(&b_count.abs_diff(target)),
+                None => std::cmp::Ordering::Equal,
+            }
+            // A geometric seam such as a wing bend is more valuable than
+            // reducing the number of automatically planned tiles.
+            .then_with(|| b.preference.total_cmp(&a.preference))
+            .then_with(|| a.tiles.cmp(&b.tiles))
+            .then_with(|| a_count.cmp(b_count))
+            .then_with(|| b.shortest_span.total_cmp(&a.shortest_span))
         })
         .map(|(_, route)| route)
         .ok_or(SegmentationError::NoPrintablePartition)?;
@@ -1531,6 +1535,55 @@ mod tests {
                 chord: (0.0, 1.0),
             }
         );
+    }
+
+    #[test]
+    fn tiled_partitioner_prefers_a_geometric_seam_over_fewer_span_sections() {
+        let boundaries = [
+            SegmentBoundary {
+                position: 0.0,
+                preference: 0.0,
+            },
+            SegmentBoundary {
+                position: 100.0,
+                preference: 10.0,
+            },
+            SegmentBoundary {
+                position: 200.0,
+                preference: 0.0,
+            },
+            SegmentBoundary {
+                position: 300.0,
+                preference: 0.0,
+            },
+        ];
+        let tiles = partition_tiles_for_print_volume(
+            &boundaries,
+            TiledSegmentationSettings {
+                span: SegmentationSettings {
+                    print_volume: PrintVolume {
+                        width: 100.0,
+                        depth: 100.0,
+                        height: 500.0,
+                        clearance: 0.0,
+                    },
+                    preferred_segment_count: None,
+                    max_segment_count: 3,
+                },
+                max_longitudinal_segments: 2,
+            },
+            |start, end, chord| {
+                if (start == 0.0 && end == 300.0) || (start == 100.0 && end == 300.0) {
+                    return None;
+                }
+                let full_width = 50.0;
+                Some([full_width * (chord.1 - chord.0), 20.0, end - start])
+            },
+        )
+        .unwrap();
+
+        assert_eq!(tiles.len(), 3);
+        assert!(tiles.iter().any(|tile| tile.span.1 == 100.0));
     }
 
     #[test]

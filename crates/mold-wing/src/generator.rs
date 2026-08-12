@@ -1573,7 +1573,7 @@ mod tests {
     }
 
     #[test]
-    fn scaled_gull_sample_requires_more_than_five_print_tiles() {
+    fn scaled_gull_sample_preserves_the_bend_and_keeps_the_narrow_tip_whole() {
         let mut spec = mold_wing_geometry::preset("gull").unwrap();
         for station in &mut spec.stations {
             station.span *= 1.37;
@@ -1623,6 +1623,18 @@ mod tests {
         .unwrap();
 
         assert!(tiles.len() > 5, "unexpected five-tile plan: {tiles:?}");
+        let bend_span = spec.stations[1].span;
+        assert!(
+            tiles
+                .iter()
+                .any(|tile| (tile.span.1 - bend_span).abs() < 1.0e-9),
+            "plan does not end a section at the gull bend: {tiles:?}"
+        );
+        let tip_range = tiles.last().unwrap().span;
+        let tip_tiles: Vec<&PrintTile> =
+            tiles.iter().filter(|tile| tile.span == tip_range).collect();
+        assert_eq!(tip_tiles.len(), 1, "narrow tip was split: {tiles:?}");
+        assert_eq!(tip_tiles[0].chord, (0.0, 1.0));
     }
 
     #[test]
